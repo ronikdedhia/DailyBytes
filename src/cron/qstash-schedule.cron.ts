@@ -16,7 +16,7 @@ async function registerSchedule(qstash: Client, destination: string, cron: strin
  */
 export async function initializeQStashSchedules() {
   const token = process.env.QSTASH_TOKEN;
-  const backendUrl = process.env.BACKEND_PUBLIC_URL;
+  const backendUrl = process.env.BACKEND_PUBLIC_URL?.replace(/\/+$/, '');
   if (!token || !backendUrl) {
     logger.info('[qstash] QSTASH_TOKEN or BACKEND_PUBLIC_URL not set — relying on node-cron only');
     return;
@@ -27,8 +27,7 @@ export async function initializeQStashSchedules() {
   try {
     await registerSchedule(qstash, `${backendUrl}/api/qstash/alpha-vantage`,        '30 7 * * *',  'Alpha Vantage pipeline — 1:00 PM IST daily');
     await registerSchedule(qstash, `${backendUrl}/api/qstash/news-data`,            '30 8 * * *',  'NewsData pipeline — 2:00 PM IST daily');
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/cleanup-newsdata`,     '30 12 * * *', 'NewsData cleanup check — 6:00 PM IST daily');
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/cleanup-alphavantage`, '30 12 * * *', 'Alpha Vantage cleanup check — 6:00 PM IST daily');
+    await registerSchedule(qstash, `${backendUrl}/api/qstash/cleanup`,              '30 12 * * *', 'Article cleanup check — 6:00 PM IST daily');
 
     const sendTime = process.env.NEWSLETTER_SEND_TIME || '06:30';
     const newsletterCron = getNewsletterCronExpression(sendTime);

@@ -2,9 +2,19 @@ import cron from 'node-cron';
 import { logger } from '../utils/logger';
 import { pipelineService } from '../services/pipeline.service';
 import { cleanupService } from '../services/cleanup.service';
+import { jobStateService } from '../services/job-state.service';
+import { runExclusive } from '../lib/job-lock';
 
-let lastCleanupDateNewsData: Date | null = null;
-let lastCleanupDateAlphaVantage: Date | null = null;
+export const CLEANUP_INTERVAL_DAYS = 15;
+export const CLEANUP_MAX_AGE_DAYS = 30;
+export const CLEANUP_STATE_KEY = 'cleanup:last_run_at';
+
+const DAY_MS = 1000 * 60 * 60 * 24;
+
+export type JobOutcome =
+  | { status: 'completed'; result?: unknown }
+  | { status: 'skipped' }
+  | { status: 'failed'; error: string };
 
 /**
  * Schedule news fetching and processing pipeline
@@ -25,17 +35,11 @@ export function initializeNewsPipeline() {
     await executeAlphaVantageJob();
   });
 
-  // ===== Cleanup Jobs =====
-  // 6:00 PM IST = 12:30 UTC
-  const newsDataCleanup = cron.schedule('30 12 * * *', async () => {
-    logger.info('⏰ Cron triggered: NewsData Cleanup check');
-    await executeNewsDataCleanupJob();
-  });
-
-  // 6:00 PM IST = 12:30 UTC
-  const alphaVantageCleanup = cron.schedule('30 12 * * *', async () => {
-    logger.info('⏰ Cron triggered: Alpha Vantage Cleanup check');
-    await executeAlphaVantageCleanupJob();
+  // ===== Cleanup Job =====
+  // 6:00 PM IST = 12:30 UTC. Articles aren't stored per source, so one job covers both.
+  const cleanup = cron.schedule('30 12 * * *', async () => {
+    logger.info('⏰ Cron triggered: article cleanup check');
+    await executeCleanupJob();
   });
 
   logger.info('✅ News pipeline cron jobs initialized');
@@ -43,120 +47,96 @@ export function initializeNewsPipeline() {
   logger.info('📅 Alpha Vantage: 1:00 PM IST daily');
   logger.info('📅 Cleanup: 6:00 PM IST daily');
 
-  return {
-    newsData,
-    alphaVantage,
-    newsDataCleanup,
-    alphaVantageCleanup,
-  };
+  return { newsData, alphaVantage, cleanup };
 }
 
 /**
  * Execute NewsData pipeline
  */
-export async function executeNewsDataJob() {
-  try {
-    logger.info('🔄 NewsData pipeline job started');
-    const result = await pipelineService.executeNewsDataPipeline();
-    logger.info(`✅ NewsData done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
-  } catch (error: any) {
-    logger.error(`❌ NewsData pipeline job failed: ${error.message}`);
-  }
+export async function executeNewsDataJob(): Promise<JobOutcome> {
+  let outcome: JobOutcome = { status: 'skipped' };
+  await runExclusive('newsdata-pipeline', async () => {
+    try {
+      logger.info('🔄 NewsData pipeline job started');
+      const result = await pipelineService.executeNewsDataPipeline();
+      outcome = { status: 'completed', result };
+      logger.info(`✅ NewsData done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
+    } catch (error: any) {
+      logger.error(`❌ NewsData pipeline job failed: ${error.message}`);
+      outcome = { status: 'failed', error: error.message };
+    }
+  });
+  return outcome;
 }
 
 /**
  * Execute Alpha Vantage pipeline
  */
-export async function executeAlphaVantageJob() {
-  try {
-    logger.info('🔄 Alpha Vantage pipeline job started');
-    const result = await pipelineService.executeAlphaVantagePipeline();
-    logger.info(`✅ Alpha Vantage done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
-  } catch (error: any) {
-    logger.error(`❌ Alpha Vantage pipeline job failed: ${error.message}`);
-  }
+export async function executeAlphaVantageJob(): Promise<JobOutcome> {
+  let outcome: JobOutcome = { status: 'skipped' };
+  await runExclusive('alphavantage-pipeline', async () => {
+    try {
+      logger.info('🔄 Alpha Vantage pipeline job started');
+      const result = await pipelineService.executeAlphaVantagePipeline();
+      outcome = { status: 'completed', result };
+      logger.info(`✅ Alpha Vantage done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
+    } catch (error: any) {
+      logger.error(`❌ Alpha Vantage pipeline job failed: ${error.message}`);
+      outcome = { status: 'failed', error: error.message };
+    }
+  });
+  return outcome;
+}
+
+export type CleanupDecision = 'initialize' | 'run' | 'skip';
+
+/**
+ * Pure decision for the cleanup job. With no recorded run, the schedule is
+ * initialised (not run), so the first deletion happens one interval later.
+ */
+export function decideCleanup(lastRunAt: Date | null, now: Date, intervalDays = CLEANUP_INTERVAL_DAYS): CleanupDecision {
+  if (!lastRunAt || Number.isNaN(lastRunAt.getTime())) return 'initialize';
+  const daysSince = Math.floor((now.getTime() - lastRunAt.getTime()) / DAY_MS);
+  return daysSince >= intervalDays ? 'run' : 'skip';
 }
 
 /**
- * Execute NewsData cleanup with smart 15-day interval check
+ * Delete articles older than CLEANUP_MAX_AGE_DAYS, at most once every
+ * CLEANUP_INTERVAL_DAYS. The last-run time is stored in the database so the
+ * interval survives restarts.
  */
-export async function executeNewsDataCleanupJob() {
-  try {
-    const now = new Date();
+export async function executeCleanupJob(now: Date = new Date()): Promise<JobOutcome> {
+  let outcome: JobOutcome = { status: 'skipped' };
+  await runExclusive('cleanup', async () => {
+    try {
+      const stored = await jobStateService.get(CLEANUP_STATE_KEY);
+      const lastRunAt = stored ? new Date(stored) : null;
+      const decision = decideCleanup(lastRunAt, now);
 
-    if (lastCleanupDateNewsData === null) {
-      const envLastCleanup = process.env.LAST_CLEANUP_DATE_NEWSDATA;
-      if (envLastCleanup) {
-        lastCleanupDateNewsData = new Date(envLastCleanup);
-      } else {
-        lastCleanupDateNewsData = now;
-        logger.info('📅 First cleanup run for NewsData - initializing cleanup schedule');
+      if (decision === 'initialize') {
+        await jobStateService.set(CLEANUP_STATE_KEY, now.toISOString());
+        logger.info(`📅 No previous cleanup recorded — first cleanup will run in ${CLEANUP_INTERVAL_DAYS} days`);
+        outcome = { status: 'completed', result: { decision } };
         return;
       }
-    }
 
-    const daysSinceLastCleanup = Math.floor(
-      (now.getTime() - lastCleanupDateNewsData.getTime()) / (1000 * 60 * 60 * 24)
-    );
-
-    if (daysSinceLastCleanup >= 15) {
-      logger.info(`�️ NewsData cleanup job started (${daysSinceLastCleanup} days since last run)`);
-
-      const result = await cleanupService.deleteOldArticles(30);
-
-      lastCleanupDateNewsData = now;
-      process.env.LAST_CLEANUP_DATE_NEWSDATA = now.toISOString();
-
-      logger.info(`✅ NewsData cleanup job completed: ${result.deleted} articles deleted`);
-    } else {
-      logger.debug(
-        `⏭️ NewsData cleanup skipped: Only ${daysSinceLastCleanup} days since last run (need 15 days)`
-      );
-    }
-  } catch (error: any) {
-    logger.error(`❌ NewsData cleanup job failed: ${error.message}`);
-  }
-}
-
-/**
- * Execute Alpha Vantage cleanup with smart 15-day interval check
- */
-export async function executeAlphaVantageCleanupJob() {
-  try {
-    const now = new Date();
-
-    if (lastCleanupDateAlphaVantage === null) {
-      const envLastCleanup = process.env.LAST_CLEANUP_DATE_ALPHAVANTAGE;
-      if (envLastCleanup) {
-        lastCleanupDateAlphaVantage = new Date(envLastCleanup);
-      } else {
-        lastCleanupDateAlphaVantage = now;
-        logger.info('� First cleanup run for Alpha Vantage - initializing cleanup schedule');
+      if (decision === 'skip') {
+        logger.debug(`⏭ Cleanup skipped: last run ${lastRunAt!.toISOString()} (interval ${CLEANUP_INTERVAL_DAYS} days)`);
+        outcome = { status: 'completed', result: { decision } };
         return;
       }
+
+      logger.info(`🗑 Cleanup job started (last run ${lastRunAt!.toISOString()})`);
+      const result = await cleanupService.deleteOldArticles(CLEANUP_MAX_AGE_DAYS);
+      await jobStateService.set(CLEANUP_STATE_KEY, now.toISOString());
+      logger.info(`✅ Cleanup job completed: ${result.deleted} articles deleted`);
+      outcome = { status: 'completed', result: { decision, deleted: result.deleted } };
+    } catch (error: any) {
+      logger.error(`❌ Cleanup job failed: ${error.message}`);
+      outcome = { status: 'failed', error: error.message };
     }
-
-    const daysSinceLastCleanup = Math.floor(
-      (now.getTime() - lastCleanupDateAlphaVantage.getTime()) / (1000 * 60 * 60 * 24)
-    );
-
-    if (daysSinceLastCleanup >= 15) {
-      logger.info(`�️ Alpha Vantage cleanup job started (${daysSinceLastCleanup} days since last run)`);
-
-      const result = await cleanupService.deleteOldArticles(30);
-
-      lastCleanupDateAlphaVantage = now;
-      process.env.LAST_CLEANUP_DATE_ALPHAVANTAGE = now.toISOString();
-
-      logger.info(`✅ Alpha Vantage cleanup job completed: ${result.deleted} articles deleted`);
-    } else {
-      logger.debug(
-        `⏭️ Alpha Vantage cleanup skipped: Only ${daysSinceLastCleanup} days since last run (need 15 days)`
-      );
-    }
-  } catch (error: any) {
-    logger.error(`❌ Alpha Vantage cleanup job failed: ${error.message}`);
-  }
+  });
+  return outcome;
 }
 
 /**
@@ -164,10 +144,12 @@ export async function executeAlphaVantageCleanupJob() {
  */
 export async function triggerNewsPipelineManually() {
   logger.info('🔄 Manual trigger: News pipeline');
-  try {
-    const result = await pipelineService.executeNewsDataPipeline({ fresh: true });
-    logger.info(`✅ Manual trigger done: ${result.processed} processed, ${result.saved} saved, ${result.errors} errors`);
-  } catch (error: any) {
-    logger.error(`❌ Manual trigger failed: ${error.message}`);
-  }
+  await runExclusive('newsdata-pipeline', async () => {
+    try {
+      const result = await pipelineService.executeNewsDataPipeline({ fresh: true });
+      logger.info(`✅ Manual trigger done: ${result.processed} processed, ${result.saved} saved, ${result.errors} errors`);
+    } catch (error: any) {
+      logger.error(`❌ Manual trigger failed: ${error.message}`);
+    }
+  });
 }

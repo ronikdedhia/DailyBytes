@@ -1,0 +1,71 @@
+name: Scheduled jobs
+
+# The backend runs on Render's free tier, which sleeps after ~15 minutes idle,
+# so in-process node-cron jobs only fire if someone happens to be on the site.
+# This workflow wakes the backend and runs each job over HTTP.
+#
+# Setup (repo Settings → Secrets and variables → Actions):
+#   secret   PIPELINE_SECRET  same value as the backend's PIPELINE_SECRET
+#   variable BACKEND_URL      e.g. https://daily-bytes-ai.onrender.com
+#
+# GitHub may start scheduled runs late, and disables schedules after 60 days
+# without repository activity.
+
+on:
+  schedule:
+    - cron: '30 6 * * *'   # newsletter     12:00 PM IST
+    - cron: '30 7 * * *'   # alpha-vantage   1:00 PM IST
+    - cron: '30 8 * * *'   # news-data       2:00 PM IST
+    - cron: '30 12 * * *'  # cleanup         6:00 PM IST
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Job to run
+        required: true
+        type: choice
+        options: [news-data, alpha-vantage, newsletter, cleanup]
+
+concurrency:
+  group: scheduled-jobs-${{ github.event.schedule || inputs.job }}
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Pick job
+        id: pick
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+          INPUT_JOB: ${{ inputs.job }}
+        run: |
+          case "$SCHEDULE" in
+            '30 6 * * *')  job=newsletter ;;
+            '30 7 * * *')  job=alpha-vantage ;;
+            '30 8 * * *')  job=news-data ;;
+            '30 12 * * *') job=cleanup ;;
+            *)             job="$INPUT_JOB" ;;
+          esac
+          if [ -z "$job" ]; then echo "No job selected"; exit 1; fi
+          echo "job=$job" >> "$GITHUB_OUTPUT"
+
+      - name: Wake backend
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+        run: |
+          test -n "$BACKEND_URL" || { echo "BACKEND_URL variable is not set"; exit 1; }
+          curl -fsS --retry 6 --retry-delay 20 --retry-all-errors --max-time 90 "$BACKEND_URL/health"
+
+      - name: Run ${{ steps.pick.outputs.job }}
+        env:
+          BACKEND_URL: ${{ vars.BACKEND_URL }}
+          PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
+          JOB: ${{ steps.pick.outputs.job }}
+        # No retry here: the request waits for the job, and a retry could start it twice.
+        run: |
+          curl -sS --fail-with-body --max-time 1200 -X POST "$BACKEND_URL/api/cron/$JOB" \
+            -H "x-pipeline-secret: $PIPELINE_SECRET"
+          echo

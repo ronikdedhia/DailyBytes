@@ -24,7 +24,7 @@ app.set('trust proxy', 1);
 
 app.use(helmet());
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGIN || 'http://localhost:3001',
+  origin: (process.env.ALLOWED_ORIGIN || 'http://localhost:3001').split(',').map(s => s.trim()).filter(Boolean),
   credentials: true,
 }));
 app.use(express.json({

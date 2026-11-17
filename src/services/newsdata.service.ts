@@ -31,9 +31,6 @@ class NewsDataService {
     try {
       logger.info(`Fetching ${maxArticles} latest news articles from NewsData.io`);
 
-      const since = new Date();
-      since.setUTCHours(since.getUTCHours() - 24);
-      const fromDate = since.toISOString().slice(0, 19).replace('T', ' ');
 
       const response = await this.client.get('/news', {
         params: {
@@ -45,7 +42,9 @@ class NewsDataService {
           image: 1,
           removeduplicate: 1,
           size: 10,
-          from_date: fromDate,
+          // No date filter: the latest-news endpoint already covers the past
+          // 48 hours, and `from_date` is only accepted by the archive endpoint.
+          // Repeats are dropped by the pipeline's URL dedupe step.
         },
       });
 

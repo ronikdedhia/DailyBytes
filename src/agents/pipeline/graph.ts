@@ -1,4 +1,5 @@
 import path from 'path';
+import { randomUUID } from 'crypto';
 import fs from 'fs';
 import { StateGraph, START, END, Send } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
@@ -56,12 +57,12 @@ export async function runNewsPipeline(
   source: 'newsdata' | 'alphavantage',
   opts: { fresh?: boolean } = {}
 ): Promise<PipelineMetrics> {
-  // Cron uses a stable date-scoped thread ID — resumes from last checkpoint on failure.
-  // Manual/fresh invocations get a UUID so they always run from scratch.
-  const today = new Date().toISOString().slice(0, 10);
-  const threadId = opts.fresh
-    ? `${source}-manual-${Date.now()}`
-    : `${source}-${today}`;
+  // Every run gets its own thread. Reusing a date-scoped thread made a second
+  // run on the same day (node-cron + external scheduler) start from START with
+  // the previous run's state still in the append-reducer channels
+  // (enrichedArticles, errors), so old articles were re-persisted and counted.
+  // Passing new input never resumed a failed run anyway.
+  const threadId = `${source}-${opts.fresh ? 'manual' : 'scheduled'}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 
   const config = { configurable: { thread_id: threadId } };
   let finalState: PipelineState | undefined;

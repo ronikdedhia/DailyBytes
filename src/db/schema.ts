@@ -224,6 +224,11 @@ export const pipelineRuns = sqliteTable(
   })
 );
 
+export const jobState = sqliteTable('job_state', {
+  key: text('key').primaryKey(),
+  value: text('value').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Article = typeof articles.$inferSelect;

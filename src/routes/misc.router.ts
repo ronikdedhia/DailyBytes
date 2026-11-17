@@ -11,6 +11,7 @@ import { db } from '../db/client';
 import { articles as articlesTable, users } from '../db/schema';
 import { gte, eq } from 'drizzle-orm';
 import { getCached, setCached } from '../lib/redis';
+import { logger } from '../utils/logger';
 
 const router = Router();
 
@@ -44,15 +45,24 @@ router.get('/search', optionalAuth, asyncHandler(async (req, res) => {
   const offset = parseInt(req.query.offset as string) || 0;
 
   let articles: any[];
+  let fallback: 'keyword' | undefined;
   if (mode === 'semantic') {
     const cacheKey = `cache:search:semantic:${query.toLowerCase()}:${limit}`;
     const cachedSemantic = await getCached<any[]>(cacheKey);
     if (cachedSemantic) {
       articles = cachedSemantic;
     } else {
-      const embedding = await embedText(query);
-      articles = await articleService.semanticSearch(embedding, limit);
-      await setCached(cacheKey, articles, 300);
+      try {
+        const embedding = await embedText(query);
+        articles = await articleService.semanticSearch(embedding, limit);
+        await setCached(cacheKey, articles, 300);
+      } catch (error: any) {
+        // Embedding provider down or out of credits: degrade to keyword search
+        // instead of failing the request.
+        logger.warn(`Semantic search unavailable, falling back to keyword: ${error.message}`);
+        articles = await articleService.searchArticles(query, limit, offset);
+        fallback = 'keyword';
+      }
     }
   } else {
     articles = await articleService.searchArticles(query, limit, offset);
@@ -66,7 +76,7 @@ router.get('/search', optionalAuth, asyncHandler(async (req, res) => {
     articlesWithBookmarks = articles.map((a: any) => ({ ...a, isBookmarked: false }));
   }
 
-  return res.json({ success: true, query, mode, count: articlesWithBookmarks.length, articles: articlesWithBookmarks });
+  return res.json({ success: true, query, mode, ...(fallback && { fallback }), count: articlesWithBookmarks.length, articles: articlesWithBookmarks });
 }));
 
 router.get('/trending-hashtags', asyncHandler(async (req, res) => {

@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import { createClient } from '@libsql/client';
 import { logger } from '../utils/logger';
+import { ensureEmbeddingColumn, EMBEDDING_DIM } from './embedding-migration';
 
 const connectionString = process.env.DATABASE_URL;
 const authToken = process.env.DATABASE_AUTH_TOKEN;
@@ -415,25 +416,21 @@ async function runMigrations() {
     logger.info('✅ Created api_keys table');
     await client.execute(`CREATE INDEX IF NOT EXISTS idx_api_keys_key ON api_keys(key)`);
     await client.execute(`CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id)`);
+    // Create job_state table (scheduler bookkeeping, e.g. last cleanup time)
+    await client.execute(`
+      CREATE TABLE IF NOT EXISTS job_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      )
+    `);
+    logger.info('✅ Created job_state table');
 
-    // Add embedding column for vector search (F32_BLOB, 384-dim from all-MiniLM-L6-v2)
-    try {
-      await client.execute(`ALTER TABLE articles ADD COLUMN embedding F32_BLOB(384)`);
-      logger.info('✅ Added embedding column to articles');
-    } catch (e: any) {
-      if (e.message.includes('duplicate column') || e.message.includes('already exists')) {
-        logger.info('ℹ️  embedding column already exists');
-      } else throw e;
-    }
-
-    // Create vector index for ANN search
-    try {
-      await client.execute(
-        `CREATE INDEX IF NOT EXISTS articles_embedding_idx ON articles(libsql_vector_idx(embedding))`
-      );
-      logger.info('✅ Created vector index on articles.embedding');
-    } catch (e: any) {
-      logger.warn('ℹ️  Vector index skipped (may not be supported on this Turso plan):', e.message);
+    // Embedding column for vector search, sized for the current embedding model
+    const embeddingResult = await ensureEmbeddingColumn(client, EMBEDDING_DIM);
+    logger.info(`✅ Embedding column F32_BLOB(${EMBEDDING_DIM}): ${embeddingResult}`);
+    if (embeddingResult === 'resized') {
+      logger.warn('⚠  Old embeddings were discarded — run `npm run embed:backfill` to re-embed articles');
     }
 
     logger.info('✅ All migrations completed successfully!');

@@ -1,39 +1,29 @@
-import { Router } from 'express';
-import { asyncHandler } from '../lib/async-handler';
+import { Router, Request, Response } from 'express';
 import { qstashVerify } from '../middleware/qstash.middleware';
-import {
-  executeNewsDataJob,
-  executeAlphaVantageJob,
-  executeNewsDataCleanupJob,
-  executeAlphaVantageCleanupJob,
-} from '../cron/news-pipeline.cron';
-import { triggerNewsletterManually } from '../cron/newsletter.cron';
+import { logger } from '../utils/logger';
+import { SCHEDULED_JOBS } from '../cron/jobs';
 
 const router = Router();
 
-router.post('/qstash/news-data', qstashVerify, asyncHandler(async (_req, res) => {
-  await executeNewsDataJob();
-  res.json({ status: 'ok' });
-}));
+/**
+ * Acknowledge QStash right away and run the job in the background.
+ * Waiting for a multi-minute pipeline (plus a Render cold start) risks a
+ * QStash timeout, which triggers retries and duplicate runs.
+ */
+function startInBackground(name: string) {
+  const job = SCHEDULED_JOBS[name];
+  return (_req: Request, res: Response) => {
+    res.status(202).json({ status: 'accepted', job: name });
+    job().catch((error: any) => logger.error(`❌ [qstash] ${name} failed: ${error.message}`));
+  };
+}
 
-router.post('/qstash/alpha-vantage', qstashVerify, asyncHandler(async (_req, res) => {
-  await executeAlphaVantageJob();
-  res.json({ status: 'ok' });
-}));
-
-router.post('/qstash/cleanup-newsdata', qstashVerify, asyncHandler(async (_req, res) => {
-  await executeNewsDataCleanupJob();
-  res.json({ status: 'ok' });
-}));
-
-router.post('/qstash/cleanup-alphavantage', qstashVerify, asyncHandler(async (_req, res) => {
-  await executeAlphaVantageCleanupJob();
-  res.json({ status: 'ok' });
-}));
-
-router.post('/qstash/newsletter', qstashVerify, asyncHandler(async (_req, res) => {
-  await triggerNewsletterManually();
-  res.json({ status: 'ok' });
-}));
+router.post('/qstash/news-data', qstashVerify, startInBackground('news-data'));
+router.post('/qstash/alpha-vantage', qstashVerify, startInBackground('alpha-vantage'));
+router.post('/qstash/cleanup', qstashVerify, startInBackground('cleanup'));
+// Older schedules registered these two paths; both now run the single cleanup job.
+router.post('/qstash/cleanup-newsdata', qstashVerify, startInBackground('cleanup'));
+router.post('/qstash/cleanup-alphavantage', qstashVerify, startInBackground('cleanup'));
+router.post('/qstash/newsletter', qstashVerify, startInBackground('newsletter'));
 
 export default router;

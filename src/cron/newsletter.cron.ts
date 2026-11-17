@@ -1,6 +1,9 @@
 import cron from 'node-cron';
 import { logger } from '../utils/logger';
 import { newsletterService } from '../services/newsletter.service';
+import { jobStateService } from '../services/job-state.service';
+import { runExclusive } from '../lib/job-lock';
+import type { JobOutcome } from './news-pipeline.cron';
 
 /**
  * Parse time string in HH:MM format (e.g., "08:00")
@@ -27,7 +30,7 @@ function utcToIST(utcTime: string): string {
 
 /**
  * Initialize newsletter cron job
- * Sends daily newsletter at configured time (default: 8:00 AM)
+ * Sends daily newsletter at NEWSLETTER_SEND_TIME (UTC, default 06:30 = 12:00 PM IST)
  */
 export function initializeNewsletterCron() {
   const sendTime = process.env.NEWSLETTER_SEND_TIME || '06:30'; // 12:00 PM IST = 06:30 UTC
@@ -35,7 +38,7 @@ export function initializeNewsletterCron() {
 
   const newsletterJob = cron.schedule(cronExpression, async () => {
     logger.info(`⏰ Cron triggered: Daily newsletter (${utcToIST(sendTime)})`);
-    await executeNewsletterJob();
+    await executeScheduledNewsletterJob();
   });
 
   logger.info('✅ Newsletter cron job initialized');
@@ -44,10 +47,12 @@ export function initializeNewsletterCron() {
   return { newsletterJob };
 }
 
+export const NEWSLETTER_STATE_KEY = 'newsletter:last_sent_date';
+
 /**
  * Execute newsletter send with error handling
  */
-async function executeNewsletterJob() {
+async function executeNewsletterJob(): Promise<JobOutcome> {
   const jobStartTime = new Date().toISOString();
 
   try {
@@ -57,15 +62,44 @@ async function executeNewsletterJob() {
 
     logger.info(`✅ Newsletter job completed`);
     logger.info(`📈 Results: ${result.sent} sent, ${result.failed} failed`);
+    return { status: 'completed', result };
   } catch (error: any) {
     logger.error(`❌ Newsletter job failed: ${error.message}`);
+    return { status: 'failed', error: error.message };
   }
 }
 
 /**
- * Manual trigger for testing
+ * Scheduled send (node-cron and QStash both call this). Sends at most once per
+ * UTC day, so the two schedulers firing together don't email users twice.
+ */
+export async function executeScheduledNewsletterJob(now: Date = new Date()): Promise<JobOutcome> {
+  const today = now.toISOString().slice(0, 10);
+  let outcome: JobOutcome = { status: 'skipped' };
+  await runExclusive('newsletter', async () => {
+    try {
+      const lastSent = await jobStateService.get(NEWSLETTER_STATE_KEY);
+      if (lastSent === today) {
+        logger.info(`⏭ Newsletter already sent today (${today}) — skipping`);
+        outcome = { status: 'skipped' };
+        return;
+      }
+      // Mark before sending: a crash mid-send should not re-email users who already got it.
+      await jobStateService.set(NEWSLETTER_STATE_KEY, today);
+    } catch (error: any) {
+      logger.error(`❌ Newsletter job failed reading send state: ${error.message}`);
+      outcome = { status: 'failed', error: error.message };
+      return;
+    }
+    outcome = await executeNewsletterJob();
+  });
+  return outcome;
+}
+
+/**
+ * Manual trigger for testing (always sends)
  */
 export async function triggerNewsletterManually() {
   logger.info('🔄 Manual trigger: Newsletter');
-  await executeNewsletterJob();
+  await runExclusive('newsletter', async () => { await executeNewsletterJob(); });
 }
