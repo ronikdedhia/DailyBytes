@@ -1,4 +1,3 @@
-import cron from 'node-cron';
 import { logger } from '../utils/logger';
 import { pipelineService } from '../services/pipeline.service';
 import { cleanupService } from '../services/cleanup.service';
@@ -14,40 +13,13 @@ const DAY_MS = 1000 * 60 * 60 * 24;
 export type JobOutcome =
   | { status: 'completed'; result?: unknown }
   | { status: 'skipped' }
-  | { status: 'failed'; error: string };
+  | { status: 'failed'; error: string; result?: unknown };
 
-/**
- * Schedule news fetching and processing pipeline
- * NewsData: 2:00 PM IST, Alpha Vantage: 1:00 PM IST, Cleanup at 6:00 PM IST
- */
-export function initializeNewsPipeline() {
-  // ===== NewsData Pipeline =====
-  // 2:00 PM IST = 08:30 UTC
-  const newsData = cron.schedule('30 8 * * *', async () => {
-    logger.info('⏰ Cron triggered: 2:00 PM IST NewsData pipeline');
-    await executeNewsDataJob();
-  });
-
-  // ===== Alpha Vantage Pipeline =====
-  // 1:00 PM IST = 07:30 UTC
-  const alphaVantage = cron.schedule('30 7 * * *', async () => {
-    logger.info('⏰ Cron triggered: 1:00 PM IST Alpha Vantage pipeline');
-    await executeAlphaVantageJob();
-  });
-
-  // ===== Cleanup Job =====
-  // 6:00 PM IST = 12:30 UTC. Articles aren't stored per source, so one job covers both.
-  const cleanup = cron.schedule('30 12 * * *', async () => {
-    logger.info('⏰ Cron triggered: article cleanup check');
-    await executeCleanupJob();
-  });
-
-  logger.info('✅ News pipeline cron jobs initialized');
-  logger.info('📅 NewsData: 2:00 PM IST daily');
-  logger.info('📅 Alpha Vantage: 1:00 PM IST daily');
-  logger.info('📅 Cleanup: 6:00 PM IST daily');
-
-  return { newsData, alphaVantage, cleanup };
+/** A run that saved nothing and only hit errors (e.g. the news API rejected the request) counts as failed. */
+export function pipelineOutcome(result: { saved: number; errors: number }): JobOutcome {
+  return result.saved === 0 && result.errors > 0
+    ? { status: 'failed', error: `no articles saved, ${result.errors} error(s)`, result } as JobOutcome
+    : { status: 'completed', result };
 }
 
 /**
@@ -59,7 +31,7 @@ export async function executeNewsDataJob(): Promise<JobOutcome> {
     try {
       logger.info('🔄 NewsData pipeline job started');
       const result = await pipelineService.executeNewsDataPipeline();
-      outcome = { status: 'completed', result };
+      outcome = pipelineOutcome(result);
       logger.info(`✅ NewsData done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
     } catch (error: any) {
       logger.error(`❌ NewsData pipeline job failed: ${error.message}`);
@@ -78,7 +50,7 @@ export async function executeAlphaVantageJob(): Promise<JobOutcome> {
     try {
       logger.info('🔄 Alpha Vantage pipeline job started');
       const result = await pipelineService.executeAlphaVantagePipeline();
-      outcome = { status: 'completed', result };
+      outcome = pipelineOutcome(result);
       logger.info(`✅ Alpha Vantage done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
     } catch (error: any) {
       logger.error(`❌ Alpha Vantage pipeline job failed: ${error.message}`);

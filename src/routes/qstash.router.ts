@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { qstashVerify } from '../middleware/qstash.middleware';
 import { logger } from '../utils/logger';
-import { SCHEDULED_JOBS } from '../cron/jobs';
+import { runDailyJob } from '../cron/daily-jobs';
 
 const router = Router();
 
@@ -11,10 +11,9 @@ const router = Router();
  * QStash timeout, which triggers retries and duplicate runs.
  */
 function startInBackground(name: string) {
-  const job = SCHEDULED_JOBS[name];
   return (_req: Request, res: Response) => {
     res.status(202).json({ status: 'accepted', job: name });
-    job().catch((error: any) => logger.error(`❌ [qstash] ${name} failed: ${error.message}`));
+    runDailyJob(name).catch((error: any) => logger.error(`❌ [qstash] ${name} failed: ${error.message}`));
   };
 }
 

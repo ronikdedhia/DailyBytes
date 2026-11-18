@@ -1,4 +1,3 @@
-import cron from 'node-cron';
 import { logger } from '../utils/logger';
 import { newsletterService } from '../services/newsletter.service';
 import { jobStateService } from '../services/job-state.service';
@@ -16,35 +15,6 @@ export function getNewsletterCronExpression(timeString: string): string {
     return '0 8 * * *';
   }
   return `${minutes} ${hours} * * *`;
-}
-
-function utcToIST(utcTime: string): string {
-  const [h, m] = utcTime.split(':').map(Number);
-  const totalMins = (h * 60 + m + 330) % (24 * 60);
-  const istH = Math.floor(totalMins / 60);
-  const istM = totalMins % 60;
-  const period = istH >= 12 ? 'PM' : 'AM';
-  const h12 = istH === 0 ? 12 : istH > 12 ? istH - 12 : istH;
-  return `${h12}:${istM.toString().padStart(2, '0')} ${period} IST`;
-}
-
-/**
- * Initialize newsletter cron job
- * Sends daily newsletter at NEWSLETTER_SEND_TIME (UTC, default 06:30 = 12:00 PM IST)
- */
-export function initializeNewsletterCron() {
-  const sendTime = process.env.NEWSLETTER_SEND_TIME || '06:30'; // 12:00 PM IST = 06:30 UTC
-  const cronExpression = getNewsletterCronExpression(sendTime);
-
-  const newsletterJob = cron.schedule(cronExpression, async () => {
-    logger.info(`⏰ Cron triggered: Daily newsletter (${utcToIST(sendTime)})`);
-    await executeScheduledNewsletterJob();
-  });
-
-  logger.info('✅ Newsletter cron job initialized');
-  logger.info(`📅 Newsletter: ${utcToIST(sendTime)} daily`);
-
-  return { newsletterJob };
 }
 
 export const NEWSLETTER_STATE_KEY = 'newsletter:last_sent_date';

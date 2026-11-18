@@ -12,6 +12,13 @@ vi.mock('../src/cron/jobs', () => ({
 vi.mock('../src/cron/news-pipeline.cron', () => ({ triggerNewsPipelineManually: vi.fn() }));
 vi.mock('../src/cron/newsletter.cron', () => ({ triggerNewsletterManually: vi.fn() }));
 vi.mock('../src/lib/redis', () => ({ deleteCached: vi.fn() }));
+const store = new Map<string, string>();
+vi.mock('../src/services/job-state.service', () => ({
+  jobStateService: {
+    get: vi.fn(async (k: string) => store.get(k) ?? null),
+    set: vi.fn(async (k: string, v: string) => { store.set(k, v); }),
+  },
+}));
 
 import pipelineRouter from '../src/routes/pipeline.router';
 import { SCHEDULED_JOBS } from '../src/cron/jobs';
@@ -27,7 +34,7 @@ beforeAll(async () => {
   base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 });
 afterAll(() => server.close());
-beforeEach(() => { process.env.PIPELINE_SECRET = 'correct-secret'; vi.mocked(SCHEDULED_JOBS['news-data']).mockClear(); });
+beforeEach(() => { store.clear(); process.env.PIPELINE_SECRET = 'correct-secret'; vi.mocked(SCHEDULED_JOBS['news-data']).mockClear(); });
 
 const post = (path: string, secret?: string) =>
   fetch(base + path, { method: 'POST', headers: secret ? { 'x-pipeline-secret': secret } : {} });
@@ -38,6 +45,14 @@ describe('POST /api/cron/:job', () => {
     expect(res.status).toBe(200);
     expect(await res.json()).toMatchObject({ success: true, job: 'news-data', status: 'completed', result: { saved: 3 } });
     expect(SCHEDULED_JOBS['news-data']).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs a job once per day unless forced', async () => {
+    await post('/api/cron/news-data', 'correct-secret');
+    const second = await post('/api/cron/news-data', 'correct-secret');
+    expect(await second.json()).toMatchObject({ status: 'skipped' });
+    await post('/api/cron/news-data?force=1', 'correct-secret');
+    expect(SCHEDULED_JOBS['news-data']).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a missing or wrong secret without running anything', async () => {

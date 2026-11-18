@@ -6,6 +6,7 @@ import { triggerNewsletterManually } from '../cron/newsletter.cron';
 import { deleteCached } from '../lib/redis';
 import { hasPipelineSecret } from '../lib/pipeline-secret';
 import { SCHEDULED_JOBS } from '../cron/jobs';
+import { runDailyJob } from '../cron/daily-jobs';
 
 const router = Router();
 
@@ -45,12 +46,12 @@ router.post('/cron/:job', asyncHandler(async (req, res) => {
     return res.status(401).json({ success: false, error: 'Unauthorized' });
   }
   const name = String(req.params.job);
-  const job = Object.prototype.hasOwnProperty.call(SCHEDULED_JOBS, name) ? SCHEDULED_JOBS[name] : undefined;
-  if (!job) {
+  if (!Object.prototype.hasOwnProperty.call(SCHEDULED_JOBS, name)) {
     return res.status(404).json({ success: false, error: `Unknown job. Use one of: ${Object.keys(SCHEDULED_JOBS).join(', ')}` });
   }
   logger.info(`📡 API: scheduled job trigger → ${name}`);
-  const outcome = await job();
+  // Once per UTC day, like the other schedulers; ?force=1 runs it again anyway.
+  const outcome = req.query.force === '1' ? await SCHEDULED_JOBS[name]() : await runDailyJob(name);
   return res.status(outcome.status === 'failed' ? 500 : 200).json({ success: outcome.status !== 'failed', job: name, ...outcome });
 }));
 

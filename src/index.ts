@@ -4,8 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { config } from './config';
 import { logger } from './utils/logger';
-import { initializeNewsPipeline } from './cron/news-pipeline.cron';
-import { initializeNewsletterCron } from './cron/newsletter.cron';
+import { initializeDailyCron, startCatchUpLoop } from './cron/daily-jobs';
 import { initializeQStashSchedules } from './cron/qstash-schedule.cron';
 import { initializeDatabase } from './db/client';
 import { warmupEmbedder } from './services/embedding.service';
@@ -90,7 +89,8 @@ const server = app.listen(PORT, async () => {
   // blip at startup used to permanently disable every cron for the process's
   // lifetime. Each job now attempts its own DB work per run and just logs/retries
   // on failure instead of silently never running again until the next restart.
-  initializeNewsPipeline();
-  initializeNewsletterCron();
+  initializeDailyCron();
+  // Runs any job that was due while the server was asleep (Render free tier), then re-checks every 15 min.
+  startCatchUpLoop();
   await initializeQStashSchedules();
 });

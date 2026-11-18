@@ -33,10 +33,10 @@ The news pipeline is a LangGraph state machine with discrete nodes: **fetch → 
 - **Graceful Degradation** — Analysis failures are non-blocking; pipeline continues with defaults
 
 ### News Sources & Scheduling
-- **NewsData.io** — Fetches from 12 categories: technology, business, sports, entertainment, health, science, education, politics, world, nation, lifestyle, opinion
-- **Alpha Vantage** — Real-time stock market news (AAPL, MSFT, GOOGL, TSLA, AMZN)
-- **Cron Schedule** — NewsData at 2:00 PM IST daily; Alpha Vantage at 1:00 PM IST daily
-- **Auto Cleanup** — Removes articles older than 30 days every 15 days (checked at 6:00 PM IST); the last-run time is stored in the `job_state` table so the interval survives restarts
+- **NewsData.io** — Latest Indian English-language news (`country=in`) in education, entertainment, politics, sports and technology; 10 articles per run
+- **Alpha Vantage** — Stock market news for AAPL, MSFT, GOOGL, TSLA, AMZN (needs a premium key; see Known limitations)
+- **Daily schedule** — runs every day even though the backend sleeps on Render's free tier (see [Scheduled Jobs](#scheduled-jobs))
+- **Auto Cleanup** — Removes articles older than 30 days, at most once every 15 days; the last-run time is stored in the `job_state` table so it survives restarts
 - **Duplicate Detection** — URL-based deduplication before insert
 
 ### Article Intelligence on Cards
@@ -236,39 +236,47 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 ---
 
 ## Scheduled Jobs
+| Time (IST) | Time (UTC) | Job |
+|---|---|---|
+| 12:00 PM | 06:30 | `newsletter` — daily email digest (`NEWSLETTER_SEND_TIME`, UTC) |
+| 1:00 PM | 07:30 | `alpha-vantage` — stock news pipeline |
+| 2:00 PM | 08:30 | `news-data` — NewsData pipeline: fetch → dedupe → AI enrich → save → Telegram → keyword alerts |
+| 6:00 PM | 12:30 | `cleanup` — delete articles older than 30 days (if 15+ days since the last cleanup) |
 
-| Time (IST) | Job |
-|---|---|
-| 2:00 PM daily | NewsData pipeline (fetch → deduplicate → analyze → embed → save → Telegram) |
-| 1:00 PM daily | Alpha Vantage stock pipeline |
-| 6:00 PM daily | Article cleanup (if 15+ days since last run) |
+The backend runs on Render's free tier, which sleeps after ~15 minutes without traffic, so an in-process timer alone is not enough. Each job runs **at most once per UTC day**, and any of these triggers can start it:
 
-Jobs are scheduled by node-cron inside the process. Because a sleeping host never fires those, they are also triggered from outside:
+1. **Catch-up on wake** — on boot and every 15 minutes while awake, the backend runs every job whose time has passed today but which hasn't completed yet. Any request wakes a sleeping Render instance, so a visitor, a health check or the triggers below are enough.
+2. **Vercel Cron** (`frontend/vercel.json`) — calls `/api/wake` on the frontend at 08:45 and 12:45 UTC, which wakes the backend. Optional `CRON_SECRET` env var on Vercel protects the route.
+3. **GitHub Actions** (`.github/workflows/scheduled-jobs.yml`) — calls `POST /api/cron/:job` with the `x-pipeline-secret` header and waits for the result. Needs the `PIPELINE_SECRET` repo secret and `BACKEND_URL` repo variable. Also runnable by hand from the Actions tab. GitHub can start scheduled runs late or skip them.
+4. **node-cron** inside the process, when it happens to be awake at the scheduled time.
+5. **Upstash QStash** (optional) — `/api/qstash/*`, signature-verified, when `QSTASH_TOKEN` and `BACKEND_PUBLIC_URL` are set.
 
-- **GitHub Actions** (`.github/workflows/scheduled-jobs.yml`) calls `POST /api/cron/:job` (`news-data`, `alpha-vantage`, `cleanup`, `newsletter`) with the `x-pipeline-secret` header and waits for the result. Needs the `PIPELINE_SECRET` repo secret and `BACKEND_URL` repo variable. Can also be run by hand from the Actions tab.
-- **Upstash QStash** (optional) calls `/api/qstash/*` (signature-verified) when `QSTASH_TOKEN` and `BACKEND_PUBLIC_URL` are set.
+A run only counts once it completes; a failed run (e.g. the news API rejects the request) is retried by the next trigger that day. Each job also holds an in-process lock, so overlapping triggers never run it twice at once. To run a job again on the same day: `POST /api/cron/:job?force=1`.
 
-Triggering a job more than once is safe. A job can only run once at a time per process, and the scheduled newsletter is sent at most once per UTC day.
-| 12:00 PM daily | Daily newsletter to all subscribed users (configurable via `NEWSLETTER_SEND_TIME`) |
-| After each pipeline run | Keyword alert check against newly saved articles |
+After each pipeline run, new articles are checked against users' keyword alerts.
 
 ---
-
 ## Setup
-
 ```bash
 # Backend
 npm install
-cp .env.example .env   # fill in keys
+cp .env.example .env     # fill in keys
 npm run db:migrate
 npm run embed:backfill   # fill missing article embeddings
-npm test
+npm test                 # vitest suite
 npm run dev
 
 # Frontend
 cd frontend
 npm install
 npm run dev
+```
+
+Other backend scripts: `npm run typecheck`, `npm run build`, `npm run db:migrate-embeddings` (resize `articles.embedding` to match the embedding model; drops old vectors).
+
+Run one job by hand:
+```bash
+curl -X POST "$BACKEND_URL/api/cron/news-data" -H "x-pipeline-secret: $PIPELINE_SECRET"
 ```
 
 ### Required Environment Variables
@@ -304,6 +312,19 @@ QSTASH_CURRENT_SIGNING_KEY= # required in production for /api/qstash/* routes
 QSTASH_NEXT_SIGNING_KEY=
 NEWSLETTER_SEND_TIME=06:30  # UTC time for daily newsletter (default 06:30 = 12:00 PM IST)
 NEWSLETTER_ARTICLES_COUNT=5
-GROQ_MODEL=qwen/qwen3.8-27b
+GROQ_MODEL=qwen/qwen3.8-27b  # retired models (e.g. llama-3.1-8b-instant) fall back to this default
 MAX_ARTICLES_TO_FETCH=10
 ```
+
+Frontend (Vercel): `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, optional `CRON_SECRET`.
+
+---
+
+## Testing
+`npm test` runs the Vitest suite in `tests/`: Clerk token verification (forged, tampered, expired and wrong-origin tokens), QStash signature checks, the `/api/cron/:job` endpoint, daily-run and catch-up logic, cleanup interval, newsletter de-duplication, job locks, NewsData request parameters, the embedding column migration (against a real in-memory libSQL database) and Groq model selection.
+
+## Known limitations
+- **Alpha Vantage** `NEWS_SENTIMENT` now needs a premium plan; with a free key the stock pipeline saves nothing.
+- **Hugging Face** inference needs credits; without them new articles get no embeddings and semantic search falls back to keyword search. Run `npm run embed:backfill` once credits are available.
+- **Brevo** rejects API calls from IP addresses not on the account's authorised list; disable that setting or add Render's outbound IPs, or newsletters will fail.
+- Some NewsData categories don't map to ours, so a few articles have no category.
