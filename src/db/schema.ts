@@ -229,6 +229,22 @@ export const jobState = sqliteTable('job_state', {
   value: text('value').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+export const telegramChats = sqliteTable('telegram_chats', {
+  chatId: text('chat_id').primaryKey(),
+  username: text('username'),
+  firstName: text('first_name'),
+  digestEnabled: integer('digest_enabled').notNull().default(1),
+  blocked: integer('blocked').notNull().default(0),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+export const telegramSubscriptions = sqliteTable('telegram_subscriptions', {
+  id: text('id').primaryKey(),
+  chatId: text('chat_id').notNull(),
+  kind: text('kind').notNull(), // 'topic' | 'alert'
+  term: text('term').notNull(),
+  createdAt: text('created_at').notNull(),
+});
 export type User = typeof users.$inferSelect;
 export type NewUser = typeof users.$inferInsert;
 export type Article = typeof articles.$inferSelect;

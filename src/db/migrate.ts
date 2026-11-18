@@ -2,6 +2,7 @@ import 'dotenv/config';
 import { createClient } from '@libsql/client';
 import { logger } from '../utils/logger';
 import { ensureEmbeddingColumn, EMBEDDING_DIM } from './embedding-migration';
+import { ensureTelegramTables } from './telegram-tables';
 
 const connectionString = process.env.DATABASE_URL;
 const authToken = process.env.DATABASE_AUTH_TOKEN;
@@ -425,6 +426,8 @@ async function runMigrations() {
       )
     `);
     logger.info('✅ Created job_state table');
+    await ensureTelegramTables(client);
+    logger.info('✅ Created telegram_chats and telegram_subscriptions tables');
 
     // Embedding column for vector search, sized for the current embedding model
     const embeddingResult = await ensureEmbeddingColumn(client, EMBEDDING_DIM);

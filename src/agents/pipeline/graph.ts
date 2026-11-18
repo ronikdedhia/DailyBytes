@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import fs from 'fs';
 import { StateGraph, START, END, Send } from '@langchain/langgraph';
 import { SqliteSaver } from '@langchain/langgraph-checkpoint-sqlite';
-import { PipelineStateAnnotation, PipelineState, PipelineMetrics } from './state';
+import { PipelineStateAnnotation, PipelineState, PipelineMetrics, PipelineSource } from './state';
 import { startRunNode } from './nodes/start-run.node';
 import { fetchNode } from './nodes/fetch.node';
 import { dedupeNode } from './nodes/dedupe.node';
@@ -31,6 +31,8 @@ function routeAfterDedupe(state: PipelineState): string | Send[] {
   return state.newArticles.map(article => new Send('enrich_article', { currentArticle: article }));
 }
 
+const PIPELINE_MAX_CONCURRENCY = Math.max(1, parseInt(process.env.PIPELINE_MAX_CONCURRENCY || '3', 10) || 3);
+
 const checkpointDir = path.resolve('/tmp', 'checkpoints');
 fs.mkdirSync(checkpointDir, { recursive: true });
 const checkpointer = SqliteSaver.fromConnString(path.join(checkpointDir, 'pipeline.db'));
@@ -54,7 +56,7 @@ export const newsPipelineGraph = new StateGraph(PipelineStateAnnotation)
   .compile({ checkpointer });
 
 export async function runNewsPipeline(
-  source: 'newsdata' | 'alphavantage',
+  source: PipelineSource,
   opts: { fresh?: boolean } = {}
 ): Promise<PipelineMetrics> {
   // Every run gets its own thread. Reusing a date-scoped thread made a second
@@ -68,7 +70,13 @@ export async function runNewsPipeline(
   let finalState: PipelineState | undefined;
 
   // stream('updates') emits { nodeName: stateUpdate } after each node — real-time visibility
-  for await (const chunk of await newsPipelineGraph.stream({ source }, { ...config, streamMode: 'updates' })) {
+  for await (const chunk of await newsPipelineGraph.stream({ source }, {
+    ...config,
+    streamMode: 'updates',
+    // Enrich fans out one task per article, ~8 Groq calls each. Groq's free tier
+    // allows 8000 tokens/min, so a wide fan-out mostly produced 429 retries.
+    maxConcurrency: PIPELINE_MAX_CONCURRENCY,
+  })) {
     const [nodeName] = Object.keys(chunk);
     logger.info(`[graph:${nodeName}] ✓`);
   }

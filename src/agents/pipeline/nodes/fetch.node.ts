@@ -1,6 +1,7 @@
 import { logger } from '../../../utils/logger';
 import { newsDataService } from '../../../services/newsdata.service';
 import { alphaVantageService } from '../../../services/alpha-vantage.service';
+import { rssService } from '../../../services/rss.service';
 import { Article } from '../../../types';
 import { PipelineState, PipelineError } from '../state';
 
@@ -10,6 +11,8 @@ export async function fetchNode(state: PipelineState): Promise<Partial<PipelineS
 
     if (state.source === 'newsdata') {
       rawArticles = await newsDataService.fetchLatestNews(10);
+    } else if (state.source === 'rss') {
+      rawArticles = await rssService.fetchCandidates();
     } else {
       const stockNews = await alphaVantageService.fetchStockNews(['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'], 10);
       rawArticles = stockNews.map(news => ({

@@ -42,6 +42,25 @@ export async function executeNewsDataJob(): Promise<JobOutcome> {
 }
 
 /**
+ * Execute the RSS pipeline (free Indian outlet feeds)
+ */
+export async function executeRssJob(): Promise<JobOutcome> {
+  let outcome: JobOutcome = { status: 'skipped' };
+  await runExclusive('rss-pipeline', async () => {
+    try {
+      logger.info('🔄 RSS pipeline job started');
+      const result = await pipelineService.executeRssPipeline();
+      outcome = pipelineOutcome(result);
+      logger.info(`✅ RSS done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
+    } catch (error: any) {
+      logger.error(`❌ RSS pipeline job failed: ${error.message}`);
+      outcome = { status: 'failed', error: error.message };
+    }
+  });
+  return outcome;
+}
+
+/**
  * Execute Alpha Vantage pipeline
  */
 export async function executeAlphaVantageJob(): Promise<JobOutcome> {

@@ -33,7 +33,9 @@ class ArticleService {
         }
 
         // Skip articles with "ONLY AVAILABLE IN PAID PLANS" or similar paywalled messages
-        if (article.content && (article.content.includes('ONLY AVAILABLE') || article.content.includes('paid') || article.content.length < 20)) {
+        // NewsData's free tier puts "ONLY AVAILABLE IN PAID PLANS" in place of the text. A bare
+        // includes('paid') also dropped real stories ("paid tribute", "unpaid wages").
+        if (article.content && (article.content.includes('ONLY AVAILABLE') || /\bpaid plans?\b/i.test(article.content) || article.content.length < 20)) {
           logger.debug(`⏭️  Article skipped (paywalled): ${article.title}`);
           skipped++;
           continue;

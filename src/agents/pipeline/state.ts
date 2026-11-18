@@ -1,6 +1,8 @@
 import { Annotation } from '@langchain/langgraph';
 import { Article } from '../../types';
 
+export type PipelineSource = 'newsdata' | 'alphavantage' | 'rss';
+
 export interface EnrichedArticle {
   raw: Article;
   titleSummary: string;
@@ -39,7 +41,7 @@ export interface PipelineMetrics {
 }
 
 export const PipelineStateAnnotation = Annotation.Root({
-  source: Annotation<'newsdata' | 'alphavantage'>({
+  source: Annotation<PipelineSource>({
     reducer: (_, b) => b,
     default: () => 'newsdata' as const,
   }),

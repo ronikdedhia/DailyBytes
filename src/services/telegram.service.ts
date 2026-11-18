@@ -1,5 +1,4 @@
 import axios from 'axios';
-import https from 'https';
 import { logger } from '../utils/logger';
 import { config } from '../config';
 
@@ -15,7 +14,6 @@ class TelegramService {
   private readonly sendMessageUrl = `https://api.telegram.org/bot${config.telegram.accessToken}/sendMessage`;
   private readonly sendPhotoUrl = `https://api.telegram.org/bot${config.telegram.accessToken}/sendPhoto`;
   private readonly chatId = config.telegram.channelId;
-  private httpsAgent = new https.Agent({ rejectUnauthorized: false });
 
   async sendMessage(message: TelegramMessage): Promise<boolean> {
     if (!this.chatId || !config.telegram.accessToken) return false;
@@ -39,7 +37,7 @@ class TelegramService {
           text: this.formatMessage(message),
           parse_mode: 'HTML',
         },
-        { headers: { 'Content-Type': 'application/json' }, httpsAgent: this.httpsAgent }
+        { headers: { 'Content-Type': 'application/json' } }
       );
 
       if (response.data.ok) {
@@ -64,7 +62,7 @@ class TelegramService {
           caption: this.formatMessage(message),
           parse_mode: 'HTML',
         },
-        { headers: { 'Content-Type': 'application/json' }, httpsAgent: this.httpsAgent }
+        { headers: { 'Content-Type': 'application/json' } }
       );
 
       if (response.data.ok) {

@@ -2,6 +2,7 @@ import { logger } from '../../../utils/logger';
 import { articleService } from '../../../services/article.service';
 import { Article } from '../../../types';
 import { PipelineState } from '../state';
+import { RSS_MAX_ARTICLES } from '../../../services/rss.service';
 
 export async function dedupeNode(state: PipelineState): Promise<Partial<PipelineState>> {
   const checks = await Promise.all(
@@ -15,8 +16,10 @@ export async function dedupeNode(state: PipelineState): Promise<Partial<Pipeline
     })
   );
 
-  const newArticles = checks.filter((a): a is Article => a !== null);
-  const dupeCount = state.rawArticles.length - newArticles.length;
+  const unseen = checks.filter((a): a is Article => a !== null);
+  // RSS returns every recent candidate; enrich only the first RSS_MAX_ARTICLES new ones.
+  const newArticles = state.source === 'rss' ? unseen.slice(0, RSS_MAX_ARTICLES) : unseen;
+  const dupeCount = state.rawArticles.length - unseen.length;
   logger.info(`🔍 [dedupe] ${newArticles.length}/${state.rawArticles.length} are new (${dupeCount} already in DB)`);
   if (newArticles.length === 0) {
     logger.warn(`⚠️ [dedupe] all ${state.rawArticles.length} articles already exist in DB`);

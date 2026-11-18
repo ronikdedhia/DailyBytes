@@ -16,6 +16,8 @@ import pipelineRouter from './routes/pipeline.router';
 import qstashRouter from './routes/qstash.router';
 import developerRouter from './routes/developer.router';
 import miscRouter from './routes/misc.router';
+import telegramRouter from './routes/telegram.router';
+import { initializeTelegramBot } from './bot';
 
 const app = express();
 
@@ -56,6 +58,7 @@ app.use('/api', pipelineRouter);
 app.use('/api', qstashRouter);
 app.use('/api', developerRouter);
 app.use('/api', miscRouter);
+app.use('/api', telegramRouter);
 
 app.use((_req: Request, res: Response) => {
   res.status(404).json({ success: false, error: 'Route not found' });
@@ -93,4 +96,5 @@ const server = app.listen(PORT, async () => {
   // Runs any job that was due while the server was asleep (Render free tier), then re-checks every 15 min.
   startCatchUpLoop();
   await initializeQStashSchedules();
+  void initializeTelegramBot();
 });

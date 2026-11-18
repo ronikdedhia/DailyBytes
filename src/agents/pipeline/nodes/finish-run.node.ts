@@ -1,6 +1,7 @@
 import { logger } from '../../../utils/logger';
 import { metricsService } from '../../../services/metrics.service';
 import { alertService } from '../../../services/alert.service';
+import { botEnabled, botService } from '../../../bot';
 import { PipelineState } from '../state';
 
 export async function finishRunNode(state: PipelineState): Promise<Partial<PipelineState>> {
@@ -18,6 +19,9 @@ export async function finishRunNode(state: PipelineState): Promise<Partial<Pipel
 
   if (state.metrics.saved > 0 && state.savedArticles.length > 0) {
     await alertService.checkNewArticles(state.savedArticles).catch(() => {});
+    if (botEnabled()) {
+      await botService.notifyAlerts(state.savedArticles).catch((err) => logger.warn(`⚠ [finish_run] bot alerts failed: ${err.message}`));
+    }
   }
 
   logger.info(

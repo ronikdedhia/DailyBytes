@@ -16,6 +16,8 @@ on:
     - cron: '30 6 * * *'   # newsletter     12:00 PM IST
     - cron: '30 7 * * *'   # alpha-vantage   1:00 PM IST
     - cron: '30 8 * * *'   # news-data       2:00 PM IST
+    - cron: '35 8 * * *'   # rss             2:05 PM IST
+    - cron: '40 8 * * *'   # telegram-digest 2:10 PM IST
     - cron: '30 12 * * *'  # cleanup         6:00 PM IST
   workflow_dispatch:
     inputs:
@@ -23,7 +25,7 @@ on:
         description: Job to run
         required: true
         type: choice
-        options: [news-data, alpha-vantage, newsletter, cleanup]
+        options: [news-data, rss, telegram-digest, alpha-vantage, newsletter, cleanup]
 
 concurrency:
   group: scheduled-jobs-${{ github.event.schedule || inputs.job }}
@@ -46,6 +48,8 @@ jobs:
             '30 6 * * *')  job=newsletter ;;
             '30 7 * * *')  job=alpha-vantage ;;
             '30 8 * * *')  job=news-data ;;
+            '35 8 * * *')  job=rss ;;
+            '40 8 * * *')  job=telegram-digest ;;
             '30 12 * * *') job=cleanup ;;
             *)             job="$INPUT_JOB" ;;
           esac

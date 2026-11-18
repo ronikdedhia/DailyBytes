@@ -34,10 +34,26 @@ The news pipeline is a LangGraph state machine with discrete nodes: **fetch → 
 
 ### News Sources & Scheduling
 - **NewsData.io** — Latest Indian English-language news (`country=in`) in education, entertainment, politics, sports and technology; 10 articles per run
+- **RSS feeds (free)** — 11 feeds from The Hindu, Hindustan Times, Mint and NDTV covering nation, business, sports, technology and entertainment (`src/services/rss.service.ts`). Items older than 36 hours or without a description are skipped; feeds are interleaved so no single outlet dominates; up to `RSS_MAX_ARTICLES` (default 15) new articles are enriched per run. Tracking parameters are stripped from URLs so the same story isn't saved twice
 - **Alpha Vantage** — Stock market news for AAPL, MSFT, GOOGL, TSLA, AMZN (needs a premium key; see Known limitations)
 - **Daily schedule** — runs every day even though the backend sleeps on Render's free tier (see [Scheduled Jobs](#scheduled-jobs))
 - **Auto Cleanup** — Removes articles older than 30 days, at most once every 15 days; the last-run time is stored in the `job_state` table so it survives restarts
 - **Duplicate Detection** — URL-based deduplication before insert
+
+### Telegram Bot (two-way)
+A personal bot alongside the broadcast channel. Users talk to it in a private chat:
+
+| Command | What it does |
+|---|---|
+| `/brief` | Top 5 stories now, followed topics first; `/brief cricket` for one topic |
+| `/topic cricket` | Follow a topic; the daily digest leads with it. `/topics` lists, `/untopic` removes |
+| `/alert RBI` | Instant message when a newly saved story mentions it. `/alerts`, `/unalert` |
+| `/digest on\|off` | Daily digest (2:10 PM IST, after the news runs) |
+| `/stop` | Delete the chat's data and stop all messages |
+
+A topic or alert is a category name (`sports`) or any word or name, matched as a whole word in the title or summary, or inside a hashtag (`cricket` matches `#IndiaCricket`). Up to 10 topics and 10 alerts per chat. Users who block the bot are skipped.
+
+The bot needs its **own** token in `TELEGRAM_BOT_TOKEN` (create one with [@BotFather](https://t.me/BotFather)); `TELEGRAM_ACCESS_TOKEN` stays the channel broadcaster. On boot the backend sets the webhook to `/api/telegram/webhook` (secret-token verified) on `BACKEND_PUBLIC_URL` or Render's `RENDER_EXTERNAL_URL`, and publishes the command menu. It refuses to replace a webhook that points at another host, so a token shared with another app isn't hijacked (override: `TELEGRAM_BOT_TAKEOVER=1`). On Render's free tier the first reply after the backend has been asleep takes ~30–60 s.
 
 ### Article Intelligence on Cards
 - **Sentiment Badge** — Color-coded badge on each card (green = positive, gray = neutral, red = negative)
@@ -176,7 +192,10 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 | `notifications` | In-app notifications triggered by keyword alert matches |
 | `user_dismissals` | Articles permanently dismissed by a user |
 | `api_keys` | Developer API keys: key value, name, daily limit, last used |
-| `pipeline_runs` | Every pipeline execution: source, status, counts, duration |
+| `pipeline_runs` | Every pipeline execution: source (`newsdata`, `rss`, `alphavantage`), status, counts, duration |
+| `job_state` | Scheduler bookkeeping: last cleanup, last daily run of each job, last newsletter date |
+| `telegram_chats` | Bot chats: digest on/off, blocked flag |
+| `telegram_subscriptions` | Bot topics and alerts per chat |
 
 ---
 
@@ -231,7 +250,8 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 | POST | `/api/newsletter/unsubscribe` | None | Public unsubscribe |
 | POST | `/api/trigger-pipeline` | Secret | Manual pipeline trigger (`x-pipeline-secret` header) |
 | POST | `/api/trigger-newsletter` | Secret | Manual newsletter trigger (`x-pipeline-secret` header) |
-| POST | `/api/cron/:job` | Secret | Run a scheduled job and wait for it (`news-data`, `alpha-vantage`, `cleanup`, `newsletter`; newsletter sends at most once per UTC day) |
+| POST | `/api/cron/:job` | Secret | Run a scheduled job and wait for it (`news-data`, `rss`, `telegram-digest`, `alpha-vantage`, `cleanup`, `newsletter`); once per UTC day unless `?force=1` |
+| POST | `/api/telegram/webhook` | Telegram secret token | Messages to the two-way bot |
 
 ---
 
@@ -240,12 +260,14 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 |---|---|---|
 | 12:00 PM | 06:30 | `newsletter` — daily email digest (`NEWSLETTER_SEND_TIME`, UTC) |
 | 1:00 PM | 07:30 | `alpha-vantage` — stock news pipeline |
-| 2:00 PM | 08:30 | `news-data` — NewsData pipeline: fetch → dedupe → AI enrich → save → Telegram → keyword alerts |
+| 2:00 PM | 08:30 | `news-data` — NewsData pipeline: fetch → dedupe → AI enrich → save → Telegram channel → keyword alerts and bot alerts |
+| 2:05 PM | 08:35 | `rss` — same pipeline over the free RSS feeds |
+| 2:10 PM | 08:40 | `telegram-digest` — personal daily digest to every bot chat with the digest on |
 | 6:00 PM | 12:30 | `cleanup` — delete articles older than 30 days (if 15+ days since the last cleanup) |
 
 The backend runs on Render's free tier, which sleeps after ~15 minutes without traffic, so an in-process timer alone is not enough. Each job runs **at most once per UTC day**, and any of these triggers can start it:
 
-1. **Catch-up on wake** — on boot and every 15 minutes while awake, the backend runs every job whose time has passed today but which hasn't completed yet. Any request wakes a sleeping Render instance, so a visitor, a health check or the triggers below are enough.
+1. **Catch-up on wake** — on boot and every 15 minutes while awake, the backend runs every job whose time has passed today but which hasn't completed yet, in schedule order (so one wake-up runs `news-data`, then `rss`, then the digest). Any request wakes a sleeping Render instance, so a visitor, a health check or the triggers below are enough.
 2. **Vercel Cron** (`frontend/vercel.json`) — calls `/api/wake` on the frontend at 08:45 and 12:45 UTC, which wakes the backend. Optional `CRON_SECRET` env var on Vercel protects the route.
 3. **GitHub Actions** (`.github/workflows/scheduled-jobs.yml`) — calls `POST /api/cron/:job` with the `x-pipeline-secret` header and waits for the result. Needs the `PIPELINE_SECRET` repo secret and `BACKEND_URL` repo variable. Also runnable by hand from the Actions tab. GitHub can start scheduled runs late or skip them.
 4. **node-cron** inside the process, when it happens to be awake at the scheduled time.
@@ -310,6 +332,9 @@ QSTASH_TOKEN=               # registers external schedules (needs BACKEND_PUBLIC
 BACKEND_PUBLIC_URL=         # public URL of this backend, e.g. https://your-app.onrender.com
 QSTASH_CURRENT_SIGNING_KEY= # required in production for /api/qstash/* routes
 QSTASH_NEXT_SIGNING_KEY=
+TELEGRAM_BOT_TOKEN=         # separate @BotFather token for the two-way bot (/brief, /topic, /alert)
+RSS_MAX_ARTICLES=15         # new RSS articles enriched per run (~8 Groq calls each)
+PIPELINE_MAX_CONCURRENCY=3  # articles enriched in parallel (Groq free tier: 8000 tokens/min)
 NEWSLETTER_SEND_TIME=06:30  # UTC time for daily newsletter (default 06:30 = 12:00 PM IST)
 NEWSLETTER_ARTICLES_COUNT=5
 GROQ_MODEL=qwen/qwen3.8-27b  # retired models (e.g. llama-3.1-8b-instant) fall back to this default
@@ -321,7 +346,7 @@ Frontend (Vercel): `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, o
 ---
 
 ## Testing
-`npm test` runs the Vitest suite in `tests/`: Clerk token verification (forged, tampered, expired and wrong-origin tokens), QStash signature checks, the `/api/cron/:job` endpoint, daily-run and catch-up logic, cleanup interval, newsletter de-duplication, job locks, NewsData request parameters, the embedding column migration (against a real in-memory libSQL database) and Groq model selection.
+`npm test` runs the Vitest suite in `tests/`: Clerk token verification (forged, tampered, expired and wrong-origin tokens), QStash signature checks, the `/api/cron/:job` endpoint, daily-run and catch-up logic, cleanup interval, newsletter de-duplication, job locks, NewsData request parameters, the embedding column migration (against a real libSQL database), Groq model selection, RSS parsing (real parser against local feeds), topic/alert matching, every bot command, alerts and digests (against a real libSQL file) and the bot webhook.
 
 ## Known limitations
 - **Alpha Vantage** `NEWS_SENTIMENT` now needs a premium plan; with a free key the stock pipeline saves nothing.

@@ -1,4 +1,5 @@
-import { executeNewsDataJob, executeAlphaVantageJob, executeCleanupJob, JobOutcome } from './news-pipeline.cron';
+import { executeNewsDataJob, executeAlphaVantageJob, executeCleanupJob, executeRssJob, JobOutcome } from './news-pipeline.cron';
+import { botEnabled, botService } from '../bot';
 import { executeScheduledNewsletterJob } from './newsletter.cron';
 
 /**
@@ -10,6 +11,15 @@ import { executeScheduledNewsletterJob } from './newsletter.cron';
 export const SCHEDULED_JOBS: Record<string, () => Promise<JobOutcome>> = {
   'news-data': () => executeNewsDataJob(),
   'alpha-vantage': () => executeAlphaVantageJob(),
+  rss: () => executeRssJob(),
+  'telegram-digest': async () => {
+    if (!botEnabled()) return { status: 'completed', result: { skipped: 'TELEGRAM_BOT_TOKEN not set' } };
+    try {
+      return { status: 'completed', result: await botService.sendDailyDigests() };
+    } catch (error: any) {
+      return { status: 'failed', error: error.message };
+    }
+  },
   cleanup: () => executeCleanupJob(),
   newsletter: () => executeScheduledNewsletterJob(),
 };
