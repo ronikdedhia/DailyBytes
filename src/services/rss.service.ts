@@ -25,12 +25,39 @@ export const RSS_FEEDS: RssFeed[] = [
   { outlet: 'Hindustan Times', url: 'https://www.hindustantimes.com/feeds/rss/cricket/rssfeed.xml', category: 'sports' },
   { outlet: 'Hindustan Times', url: 'https://www.hindustantimes.com/feeds/rss/entertainment/rssfeed.xml', category: 'entertainment' },
   { outlet: 'Mint', url: 'https://www.livemint.com/rss/news', category: 'business' },
-  { outlet: 'Mint', url: 'https://www.livemint.com/rss/markets', category: 'business' },
   { outlet: 'NDTV', url: 'https://feeds.feedburner.com/ndtvnews-top-stories', category: 'nation' },
 ];
 
-/** Max new RSS articles enriched per run (each costs ~8 Groq calls). */
-export const RSS_MAX_ARTICLES = Math.max(1, parseInt(process.env.RSS_MAX_ARTICLES || '15', 10) || 15);
+/**
+ * Free Indian stock-market feeds (replaces Alpha Vantage, whose news endpoint
+ * became premium). Moneycontrol and Business Standard answer bots with 403.
+ */
+export const MARKET_FEEDS: RssFeed[] = [
+  { outlet: 'ET Markets', url: 'https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms', category: 'business' },
+  { outlet: 'ET Markets', url: 'https://economictimes.indiatimes.com/markets/stocks/rssfeeds/2146842.cms', category: 'business' },
+  { outlet: 'Mint', url: 'https://www.livemint.com/rss/markets', category: 'business' },
+  { outlet: 'BusinessLine', url: 'https://www.thehindubusinessline.com/markets/feeder/default.rss', category: 'business' },
+];
+
+/** SQL LIKE patterns that identify stored market articles (for /api/stock-news). */
+export const MARKET_URL_PATTERNS = [
+  '%economictimes.indiatimes.com/markets/%',
+  '%livemint.com/market/%',
+  '%thehindubusinessline.com/markets/%',
+];
+
+const intEnv = (name: string, fallback: number) => Math.max(1, parseInt(process.env[name] || '', 10) || fallback);
+/** Max new articles enriched per run (one Groq call each). */
+export const RSS_MAX_ARTICLES = intEnv('RSS_MAX_ARTICLES', 25);
+export const MARKETS_MAX_ARTICLES = intEnv('MARKETS_MAX_ARTICLES', 10);
+
+export interface FeedStatus {
+  outlet: string;
+  url: string;
+  ok: boolean;
+  error?: string;
+  items: number;
+}
 const MAX_AGE_HOURS = 36;
 const MIN_DESCRIPTION_CHARS = 40;
 
@@ -114,6 +141,11 @@ class RssService {
    * already in the database and then keeps the first RSS_MAX_ARTICLES.
    */
   async fetchCandidates(feeds: RssFeed[] = RSS_FEEDS, now: Date = new Date()): Promise<Article[]> {
+    return (await this.fetchWithStatus(feeds, now)).articles;
+  }
+
+  /** Like fetchCandidates, plus whether each feed answered (for the health check). */
+  async fetchWithStatus(feeds: RssFeed[] = RSS_FEEDS, now: Date = new Date()): Promise<{ articles: Article[]; status: FeedStatus[] }> {
     const results = await Promise.allSettled(feeds.map((feed) => parser.parseURL(feed.url)));
     const perFeed: Article[][] = results.map((result, i) => {
       const feed = feeds[i];
@@ -130,7 +162,14 @@ class RssService {
     const candidates = interleave(perFeed).filter((a) => !seen.has(a.url) && (seen.add(a.url), true));
     const okFeeds = results.filter((r) => r.status === 'fulfilled').length;
     logger.info(`📡 [rss] ${candidates.length} candidate articles from ${okFeeds}/${feeds.length} feeds`);
-    return candidates;
+    const status: FeedStatus[] = results.map((result, i) => ({
+      outlet: feeds[i].outlet,
+      url: feeds[i].url,
+      ok: result.status === 'fulfilled',
+      error: result.status === 'rejected' ? String(result.reason?.message ?? result.reason).slice(0, 200) : undefined,
+      items: perFeed[i].length,
+    }));
+    return { articles: candidates, status };
   }
 }
 

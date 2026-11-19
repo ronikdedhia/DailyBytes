@@ -4,13 +4,22 @@ import { BotStore, SubscriptionKind } from './bot-store';
 import { formatArticleList, escapeHtml, BriefArticle } from './format';
 import { matchesAny, matchesTerm, normalizeTerm, MAX_TERMS_PER_KIND, MatchableArticle } from './matching';
 import { botEnabled, botToken, callBot, sendHtml, SendResult } from './telegram-api';
+import { questionKeywords } from './keywords';
 
-export type BotArticle = BriefArticle & MatchableArticle & { publishedAt?: string | Date | null };
+export type BotArticle = BriefArticle & MatchableArticle & {
+  publishedAt?: string | Date | null;
+  upvoteCount?: number | null;
+  bookmarkCount?: number | null;
+};
 
 export interface BotDeps {
   store: BotStore;
-  /** Recent articles, newest first. */
-  recentArticles: () => Promise<BotArticle[]>;
+  /** Articles from the last 7 days, newest first. */
+  recentArticles: (limit?: number) => Promise<BotArticle[]>;
+  /** Keyword search over stored articles, best match first (for /ask). */
+  searchArticles: (keywords: string[]) => Promise<BotArticle[]>;
+  /** Answer a question from the given numbered articles, citing them as [n]. */
+  answer: (question: string, articles: BotArticle[]) => Promise<string>;
   send: (chatId: string, html: string) => Promise<SendResult>;
   now?: () => Date;
 }
@@ -18,9 +27,13 @@ export interface BotDeps {
 const BRIEF_SIZE = 5;
 const ALERT_BATCH = 5;
 const SEND_GAP_MS = 50; // Telegram allows ~30 messages/second overall
+const ASK_SOURCES = 5;
+const ASK_LIMIT_PER_HOUR = 10;
+const WEEKLY_POOL = 500;
 
 export const COMMANDS = [
   { command: 'brief', description: 'Top stories now (or /brief cricket)' },
+  { command: 'ask', description: 'Ask about recent news: /ask what did RBI decide?' },
   { command: 'topic', description: 'Follow a topic for your daily digest: /topic cricket' },
   { command: 'topics', description: 'List the topics you follow' },
   { command: 'untopic', description: 'Stop following a topic' },
@@ -38,9 +51,10 @@ const HELP = [
   '',
   '/brief: top stories now (<code>/brief cricket</code> for one topic)',
   '/topic cricket: follow a topic; your daily digest (around 2:15 PM IST) shows these first',
+  '/ask what did RBI decide?: an answer from recent stories, with links',
   '/alert RBI: get a message as soon as a new story mentions it',
   '/topics, /alerts: what you follow; /untopic, /unalert to remove',
-  '/digest on | off: the daily digest',
+  '/digest on | off: the daily digest (and the Sunday weekly wrap)',
   '/stop: delete your data',
   '',
   `Topics can be a category (${['sports', 'technology', 'business', 'politics', 'entertainment'].join(', ')}) or any word or name.`,
@@ -63,6 +77,7 @@ const publishedMs = (a: BotArticle) => (a.publishedAt ? new Date(a.publishedAt).
 
 export class BotService {
   private readonly now: () => Date;
+  private readonly askLog = new Map<string, number[]>();
 
   constructor(private readonly deps: BotDeps) {
     this.now = deps.now ?? (() => new Date());
@@ -89,6 +104,8 @@ export class BotService {
         return HELP;
       case 'brief':
         return this.brief(chat.chatId, arg);
+      case 'ask':
+        return this.ask(chat.chatId, arg);
       case 'topic':
         return arg ? this.add(chat.chatId, 'topic', arg) : this.list(chat.chatId, 'topic');
       case 'topics':
@@ -164,6 +181,26 @@ export class BotService {
     return formatArticleList(topics.length ? 'Your brief' : 'Top stories', picked);
   }
 
+  private async ask(chatId: string, question: string): Promise<string> {
+    if (question.length < 5) return 'Ask a question after the command, for example <code>/ask what did RBI decide?</code>';
+    const nowMs = this.now().getTime();
+    const recent = (this.askLog.get(chatId) ?? []).filter((t) => nowMs - t < 3_600_000);
+    if (recent.length >= ASK_LIMIT_PER_HOUR) return `You can ask ${ASK_LIMIT_PER_HOUR} questions an hour. Please try again later.`;
+    this.askLog.set(chatId, [...recent, nowMs]);
+
+    const keywords = questionKeywords(question);
+    if (keywords.length === 0) return 'Please include a name or topic, for example <code>/ask what did RBI decide?</code>';
+    const sources = (await this.deps.searchArticles(keywords)).slice(0, ASK_SOURCES);
+    if (sources.length === 0) {
+      return `I couldn't find recent stories about <b>${escapeHtml(keywords.join(' '))}</b>. Try <code>/alert ${escapeHtml(keywords[0])}</code> to hear about the next one.`;
+    }
+    const answer = await this.deps.answer(question, sources);
+    const cited = new Set([...answer.matchAll(/\[(\d+)\]/g)].map((m) => Number(m[1])).filter((n) => n >= 1 && n <= sources.length));
+    const shown = cited.size ? [...cited].sort((a, b) => a - b) : sources.map((_, i) => i + 1);
+    const links = shown.map((n) => `[${n}] <a href="${escapeHtml(sources[n - 1].url).replace(/"/g, '&quot;')}">${escapeHtml(sources[n - 1].title.slice(0, 90))}</a>`);
+    return `${escapeHtml(answer)}\n\n<b>Sources</b>\n${links.join('\n')}\n\n<i>Answered from Daily Bytes summaries; check the source before relying on it.</i>`;
+  }
+
   /** Articles matching the topics first, then the newest others, up to `size`. */
   private pick(articles: BotArticle[], topics: string[], size: number): BotArticle[] {
     const onTopic = topics.length ? articles.filter((a) => matchesAny(a, topics).length > 0) : [];
@@ -221,7 +258,37 @@ export class BotService {
     logger.info(`📬 [bot] daily digest: ${sent} sent, ${failed} failed, ${chatIds.length} subscribed, ${today.length} articles`);
     return { chats: chatIds.length, sent, failed };
   }
+
+  /**
+   * Weekly wrap (Sundays): the week's top 5 stories on each chat's topics,
+   * ranked by reader engagement then recency; the week's most engaged stories
+   * when a chat follows nothing or nothing matched.
+   */
+  async sendWeeklyWraps(): Promise<{ chats: number; sent: number; failed: number }> {
+    const chatIds = await this.deps.store.digestChats();
+    if (chatIds.length === 0) return { chats: 0, sent: 0, failed: 0 };
+    const cutoff = this.now().getTime() - 7 * 24 * 3_600_000;
+    const week = (await this.deps.recentArticles(WEEKLY_POOL)).filter((a) => publishedMs(a) >= cutoff);
+    if (week.length === 0) return { chats: chatIds.length, sent: 0, failed: 0 };
+    const ranked = [...week].sort((a, b) => engagement(b) - engagement(a) || publishedMs(b) - publishedMs(a));
+    const topicsByChat = await this.deps.store.subscribersByChat('topic');
+    let sent = 0;
+    let failed = 0;
+    for (const chatId of chatIds) {
+      const topics = topicsByChat.get(chatId) ?? [];
+      const onTopic = topics.length ? ranked.filter((a) => matchesAny(a, topics).length > 0) : [];
+      const picked = (onTopic.length ? [...onTopic, ...ranked.filter((a) => !onTopic.includes(a))] : ranked).slice(0, BRIEF_SIZE);
+      const heading = onTopic.length ? `Your week in ${topics.join(', ')}` : 'The week in news';
+      const result = await this.deliver(chatId, `🗓 ${formatArticleList(heading, picked)}\n\n<i>/digest off to stop</i>`);
+      result === 'sent' ? sent++ : failed++;
+    }
+    logger.info(`🗓 [bot] weekly wrap: ${sent} sent, ${failed} failed, ${week.length} articles this week`);
+    return { chats: chatIds.length, sent, failed };
+  }
 }
+
+/** Upvotes + bookmarks, for ranking the weekly wrap. */
+const engagement = (a: BotArticle) => (a.upvoteCount ?? 0) + (a.bookmarkCount ?? 0);
 
 // ------------------------------------------------------------ webhook
 

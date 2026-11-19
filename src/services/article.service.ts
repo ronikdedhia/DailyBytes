@@ -2,6 +2,7 @@ import { db, rawClient } from '../db/client';
 import { articles, NewArticle } from '../db/schema';
 import { eq, desc, sql, and, or, like, ne, notInArray } from 'drizzle-orm';
 import { logger } from '../utils/logger';
+import { MARKET_URL_PATTERNS } from './rss.service';
 
 class ArticleService {
   /**
@@ -366,6 +367,36 @@ class ArticleService {
       .where(and(ne(articles.id, articleId), or(...tagConditions)))
       .limit(limit)
       .orderBy(desc(articles.publishedAt));
+  }
+
+  /**
+   * Articles from the last `days` days ranked by how many keywords they contain
+   * (title, summary or hashtags), then by recency. Used by the bot's /ask.
+   */
+  async searchByKeywords(keywords: string[], limit = 6, days = 30) {
+    if (keywords.length === 0) return [];
+    const haystack = "lower(coalesce(title,'') || ' ' || coalesce(content,'') || ' ' || coalesce(hashtags,''))";
+    const score = keywords.map(() => `(CASE WHEN ${haystack} LIKE ? THEN 1 ELSE 0 END)`).join(' + ');
+    const since = new Date(Date.now() - days * 86_400_000).toISOString();
+    const result = await rawClient.execute({
+      sql: `SELECT id, title, content, url, published_at, (${score}) AS score FROM articles
+            WHERE published_at >= ? AND (${score}) > 0
+            ORDER BY score DESC, published_at DESC LIMIT ?`,
+      args: [...keywords.map((k) => `%${k}%`), since, ...keywords.map((k) => `%${k}%`), limit],
+    });
+    return result.rows.map((r: any) => ({
+      id: String(r.id), title: String(r.title), content: r.content as string | null, url: String(r.url),
+      publishedAt: r.published_at as string, score: Number(r.score),
+    }));
+  }
+
+  /** Latest stored market-news articles (URLs from MARKET_URL_PATTERNS). */
+  async getMarketArticles(limit: number = 10) {
+    const patterns = MARKET_URL_PATTERNS.map((p) => sql`${articles.url} LIKE ${p}`);
+    return db.select({
+      id: articles.id, title: articles.title, content: articles.content, url: articles.url,
+      imageUrl: articles.imageUrl, publishedAt: articles.publishedAt, sentiment: articles.sentiment,
+    }).from(articles).where(or(...patterns)).orderBy(desc(articles.publishedAt)).limit(limit);
   }
 
   async getRecentArticles(limit: number = 60, excludeIds: string[] = []) {

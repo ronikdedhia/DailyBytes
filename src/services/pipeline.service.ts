@@ -14,6 +14,9 @@ class PipelineService {
   async executeRssPipeline(): Promise<PipelineMetrics> {
     return runNewsPipeline('rss');
   }
+  async executeMarketsPipeline(): Promise<PipelineMetrics> {
+    return runNewsPipeline('markets');
+  }
 }
 
 export const pipelineService = new PipelineService();

@@ -25,7 +25,7 @@ export async function initializeQStashSchedules() {
   const qstash = new Client({ token });
 
   try {
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/alpha-vantage`,        '30 7 * * *',  'Alpha Vantage pipeline — 1:00 PM IST daily');
+    await registerSchedule(qstash, `${backendUrl}/api/qstash/markets`,              '30 7 * * *',  'Market news pipeline — 1:00 PM IST daily');
     await registerSchedule(qstash, `${backendUrl}/api/qstash/news-data`,            '30 8 * * *',  'NewsData pipeline — 2:00 PM IST daily');
     await registerSchedule(qstash, `${backendUrl}/api/qstash/cleanup`,              '30 12 * * *', 'Article cleanup check — 6:00 PM IST daily');
 

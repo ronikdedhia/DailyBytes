@@ -12,8 +12,9 @@ const outcomes: Record<string, any> = {};
 vi.mock('../src/cron/jobs', () => {
   const job = (name: string) => vi.fn(async () => { calls.push(name); return outcomes[name] ?? { status: 'completed' }; });
   return { SCHEDULED_JOBS: {
-    newsletter: job('newsletter'), 'alpha-vantage': job('alpha-vantage'),
-    'news-data': job('news-data'), cleanup: job('cleanup'),
+    newsletter: job('newsletter'), markets: job('markets'), 'news-data': job('news-data'),
+    rss: job('rss'), 'telegram-digest': job('telegram-digest'), 'telegram-weekly': job('telegram-weekly'),
+    'embed-backfill': job('embed-backfill'), cleanup: job('cleanup'), 'health-check': job('health-check'),
   } };
 });
 vi.mock('../src/cron/newsletter.cron', () => ({ getNewsletterCronExpression: () => '30 6 * * *' }));
@@ -46,9 +47,9 @@ describe('runDailyJob', () => {
 describe('catchUpMissedJobs', () => {
   beforeEach(() => { store.clear(); calls.length = 0; });
 
-  it('after waking at 09:00 UTC, runs the three jobs that were due, in schedule order', async () => {
+  it('after waking at 09:00 UTC, runs every job that was due, in schedule order', async () => {
     const ran = await catchUpMissedJobs(at('2026-11-18T09:00:00Z'));
-    expect(calls).toEqual(['newsletter', 'alpha-vantage', 'news-data']);
+    expect(calls).toEqual(['newsletter', 'markets', 'news-data', 'rss', 'telegram-digest', 'telegram-weekly', 'embed-backfill']);
     expect(ran).toEqual(calls);
   });
 
@@ -59,9 +60,9 @@ describe('catchUpMissedJobs', () => {
 
   it('skips jobs that already ran today', async () => {
     store.set(dailyStateKey('newsletter'), '2026-11-18');
-    store.set(dailyStateKey('alpha-vantage'), '2026-11-18');
+    store.set(dailyStateKey('markets'), '2026-11-18');
     await catchUpMissedJobs(at('2026-11-18T13:00:00Z'));
-    expect(calls).toEqual(['news-data', 'cleanup']);
+    expect(calls).toEqual(['news-data', 'rss', 'telegram-digest', 'telegram-weekly', 'embed-backfill', 'cleanup', 'health-check']);
     calls.length = 0;
     await catchUpMissedJobs(at('2026-11-18T13:15:00Z'));
     expect(calls).toEqual([]);

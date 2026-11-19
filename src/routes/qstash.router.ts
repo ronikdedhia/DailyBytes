@@ -18,7 +18,9 @@ function startInBackground(name: string) {
 }
 
 router.post('/qstash/news-data', qstashVerify, startInBackground('news-data'));
-router.post('/qstash/alpha-vantage', qstashVerify, startInBackground('alpha-vantage'));
+router.post('/qstash/markets', qstashVerify, startInBackground('markets'));
+// Older schedules registered this path; it now runs the free market feeds.
+router.post('/qstash/alpha-vantage', qstashVerify, startInBackground('markets'));
 router.post('/qstash/cleanup', qstashVerify, startInBackground('cleanup'));
 // Older schedules registered these two paths; both now run the single cleanup job.
 router.post('/qstash/cleanup-newsdata', qstashVerify, startInBackground('cleanup'));

@@ -1,5 +1,16 @@
-import { executeNewsDataJob, executeAlphaVantageJob, executeCleanupJob, executeRssJob, JobOutcome } from './news-pipeline.cron';
+import { executeNewsDataJob, executeAlphaVantageJob, executeCleanupJob, executeRssJob, executeMarketsJob, JobOutcome } from './news-pipeline.cron';
 import { botEnabled, botService } from '../bot';
+import { rawClient } from '../db/client';
+import { backfillEmbeddings } from '../services/embedding-sync.service';
+import { healthCheckService } from '../services/health-check.service';
+
+const wrap = async (run: () => Promise<unknown>): Promise<JobOutcome> => {
+  try {
+    return { status: 'completed', result: await run() };
+  } catch (error: any) {
+    return { status: 'failed', error: error.message };
+  }
+};
 import { executeScheduledNewsletterJob } from './newsletter.cron';
 
 /**
@@ -10,6 +21,8 @@ import { executeScheduledNewsletterJob } from './newsletter.cron';
  */
 export const SCHEDULED_JOBS: Record<string, () => Promise<JobOutcome>> = {
   'news-data': () => executeNewsDataJob(),
+  markets: () => executeMarketsJob(),
+  // Not scheduled: NEWS_SENTIMENT needs a premium Alpha Vantage key. Run by hand if you have one.
   'alpha-vantage': () => executeAlphaVantageJob(),
   rss: () => executeRssJob(),
   'telegram-digest': async () => {
@@ -20,6 +33,14 @@ export const SCHEDULED_JOBS: Record<string, () => Promise<JobOutcome>> = {
       return { status: 'failed', error: error.message };
     }
   },
+  // Scheduled daily; only sends on Sundays (UTC), so the daily mark doesn't block it.
+  'telegram-weekly': () => wrap(async () => {
+    if (new Date().getUTCDay() !== 0) return { skipped: 'not Sunday' };
+    if (!botEnabled()) return { skipped: 'TELEGRAM_BOT_TOKEN not set' };
+    return botService.sendWeeklyWraps();
+  }),
+  'embed-backfill': () => wrap(() => backfillEmbeddings(rawClient, 300)),
+  'health-check': () => wrap(() => healthCheckService.run()),
   cleanup: () => executeCleanupJob(),
   newsletter: () => executeScheduledNewsletterJob(),
 };

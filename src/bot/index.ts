@@ -1,5 +1,6 @@
 import { rawClient } from '../db/client';
 import { articleService } from '../services/article.service';
+import { answerFromArticles } from '../chains/ask.chain';
 import { logger } from '../utils/logger';
 import { BotService, registerWebhook } from './bot.service';
 import { BotStore } from './bot-store';
@@ -9,7 +10,9 @@ export { botEnabled };
 
 export const botService = new BotService({
   store: new BotStore(rawClient),
-  recentArticles: () => articleService.getRecentArticles(100) as any,
+  recentArticles: (limit = 100) => articleService.getRecentArticles(limit) as any,
+  searchArticles: (keywords) => articleService.searchByKeywords(keywords, 5),
+  answer: (question, articles) => answerFromArticles(question, articles),
   send: sendHtml,
 });
 

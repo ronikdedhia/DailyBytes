@@ -20,6 +20,7 @@ let store: BotStore;
 let sent: Array<{ chatId: string; html: string }>;
 let sendResult: Record<string, SendResult>;
 let bot: BotService;
+let answerFn: (q: string, a: BotArticle[]) => Promise<string>;
 const chat = (id: string) => ({ chatId: id, firstName: 'Ronik' });
 
 beforeEach(() => {
@@ -27,9 +28,12 @@ beforeEach(() => {
   store = new BotStore(createClient({ url: `file:${join(dir, 'bot.db')}` }));
   sent = [];
   sendResult = {};
+  answerFn = async () => 'The RBI kept the repo rate unchanged [1].';
   bot = new BotService({
     store,
     recentArticles: async () => ARTICLES,
+    searchArticles: async (keywords) => ARTICLES.filter((a) => keywords.some((k) => `${a.title} ${a.content}`.toLowerCase().includes(k))),
+    answer: async (question, articles) => answerFn(question, articles),
     send: async (chatId, html) => { sent.push({ chatId, html }); return sendResult[chatId] ?? 'sent'; },
     now: () => NOW,
   });
@@ -120,5 +124,63 @@ describe('daily digest', () => {
     await bot.handleMessage(chat('1'), '/topic tennis');
     await bot.sendDailyDigests();
     expect(sent[0].html).toContain('nothing new on tennis today');
+  });
+});
+
+describe('/ask', () => {
+  it('answers from matching stories and lists only the cited sources', async () => {
+    const seen: BotArticle[][] = [];
+    answerFn = async (_q, a) => { seen.push(a); return 'The RBI kept the repo rate unchanged [1].'; };
+    const reply = await bot.handleMessage(chat('1'), '/ask what did RBI decide on the repo rate?');
+    expect(seen[0].map((a) => a.url)).toEqual(['https://e.com/3']);
+    expect(reply).toContain('The RBI kept the repo rate unchanged [1].');
+    expect(reply).toContain('[1] <a href="https://e.com/3">RBI keeps repo rate</a>');
+  });
+
+  it('escapes the model answer', async () => {
+    answerFn = async () => 'RBI <b>held</b> [1]';
+    expect(await bot.handleMessage(chat('1'), '/ask rbi repo')).toContain('RBI &lt;b&gt;held&lt;/b&gt; [1]');
+  });
+
+  it('says so when nothing matches, without calling the model', async () => {
+    let called = false;
+    answerFn = async () => { called = true; return ''; };
+    expect(await bot.handleMessage(chat('1'), '/ask what about tennis?')).toContain("couldn't find recent stories about <b>tennis</b>");
+    expect(called).toBe(false);
+  });
+
+  it('needs a question and limits each chat to 10 an hour', async () => {
+    expect(await bot.handleMessage(chat('1'), '/ask')).toContain('Ask a question');
+    for (let i = 0; i < 10; i++) await bot.handleMessage(chat('2'), '/ask rbi repo rate');
+    expect(await bot.handleMessage(chat('2'), '/ask rbi repo rate')).toContain('10 questions an hour');
+  });
+});
+
+describe('weekly wrap', () => {
+  const WEEK: BotArticle[] = [
+    { title: 'Big cricket win', content: 'x', url: 'https://e.com/w1', hashtags: '#Cricket', publishedAt: hoursAgo(50), upvoteCount: 9 },
+    { title: 'Small cricket note', content: 'x', url: 'https://e.com/w2', hashtags: '#Cricket', publishedAt: hoursAgo(5), upvoteCount: 1 },
+    { title: 'Budget explained', content: 'x', url: 'https://e.com/w3', category: 'business', publishedAt: hoursAgo(30), upvoteCount: 20, bookmarkCount: 5 },
+    { title: 'Too old', content: 'cricket', url: 'https://e.com/w4', hashtags: '#Cricket', publishedAt: hoursAgo(24 * 8), upvoteCount: 99 },
+  ];
+  beforeEach(() => {
+    bot = new BotService({
+      store, recentArticles: async () => WEEK, searchArticles: async () => [], answer: async () => '',
+      send: async (chatId, html) => { sent.push({ chatId, html }); return 'sent'; }, now: () => NOW,
+    });
+  });
+
+  it('leads with topic stories ranked by engagement, then the rest; drops older than 7 days', async () => {
+    await bot.handleMessage(chat('1'), '/topic cricket');
+    await bot.handleMessage(chat('2'), '/start');
+    expect(await bot.sendWeeklyWraps()).toEqual({ chats: 2, sent: 2, failed: 0 });
+    const one = sent.find((s) => s.chatId === '1')!.html;
+    expect(one).toContain('Your week in cricket');
+    expect(one.indexOf('Big cricket win')).toBeLessThan(one.indexOf('Small cricket note'));
+    expect(one.indexOf('Small cricket note')).toBeLessThan(one.indexOf('Budget explained'));
+    expect(one).not.toContain('Too old');
+    const two = sent.find((s) => s.chatId === '2')!.html;
+    expect(two).toContain('The week in news');
+    expect(two.indexOf('Budget explained')).toBeLessThan(two.indexOf('Big cricket win'));
   });
 });

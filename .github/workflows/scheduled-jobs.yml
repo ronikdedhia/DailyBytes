@@ -14,18 +14,20 @@ name: Scheduled jobs
 on:
   schedule:
     - cron: '30 6 * * *'   # newsletter     12:00 PM IST
-    - cron: '30 7 * * *'   # alpha-vantage   1:00 PM IST
+    - cron: '30 7 * * *'   # markets         1:00 PM IST
     - cron: '30 8 * * *'   # news-data       2:00 PM IST
     - cron: '35 8 * * *'   # rss             2:05 PM IST
     - cron: '40 8 * * *'   # telegram-digest 2:10 PM IST
     - cron: '30 12 * * *'  # cleanup         6:00 PM IST
+    - cron: '35 12 * * *'  # health-check    6:05 PM IST
+    - cron: '42 8 * * 0'   # telegram-weekly Sunday 2:12 PM IST
   workflow_dispatch:
     inputs:
       job:
         description: Job to run
         required: true
         type: choice
-        options: [news-data, rss, telegram-digest, alpha-vantage, newsletter, cleanup]
+        options: [news-data, rss, markets, telegram-digest, telegram-weekly, embed-backfill, health-check, newsletter, cleanup, alpha-vantage]
 
 concurrency:
   group: scheduled-jobs-${{ github.event.schedule || inputs.job }}
@@ -46,11 +48,13 @@ jobs:
         run: |
           case "$SCHEDULE" in
             '30 6 * * *')  job=newsletter ;;
-            '30 7 * * *')  job=alpha-vantage ;;
+            '30 7 * * *')  job=markets ;;
             '30 8 * * *')  job=news-data ;;
             '35 8 * * *')  job=rss ;;
             '40 8 * * *')  job=telegram-digest ;;
             '30 12 * * *') job=cleanup ;;
+            '35 12 * * *') job=health-check ;;
+            '42 8 * * 0')  job=telegram-weekly ;;
             *)             job="$INPUT_JOB" ;;
           esac
           if [ -z "$job" ]; then echo "No job selected"; exit 1; fi

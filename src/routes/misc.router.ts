@@ -5,7 +5,6 @@ import { articleService } from '../services/article.service';
 import { bookmarkService } from '../services/bookmark.service';
 import { metricsService } from '../services/metrics.service';
 import { ttsService } from '../services/tts.service';
-import { alphaVantageService } from '../services/alpha-vantage.service';
 import { embedText } from '../services/embedding.service';
 import { db } from '../db/client';
 import { articles as articlesTable, users } from '../db/schema';
@@ -14,20 +13,25 @@ import { getCached, setCached } from '../lib/redis';
 import { logger } from '../utils/logger';
 
 const router = Router();
+const hostname = (url: string) => { try { return new URL(url).hostname.replace(/^www\./, ''); } catch { return ''; } };
 
 router.get('/stock-news', asyncHandler(async (req, res) => {
   const limit = parseInt(req.query.limit as string) || 10;
-  const tickers = (req.query.tickers as string)?.split(',').map(t => t.trim().toUpperCase()) || ['AAPL', 'MSFT', 'GOOGL'];
 
   if (limit < 1 || limit > 50) {
     return res.status(400).json({ success: false, error: 'Limit must be between 1 and 50' });
   }
 
-  const cacheKey = `cache:stock:${tickers.sort().join(',')}:${limit}`;
+  const cacheKey = `cache:stock:markets:${limit}`;
   const cached = await getCached<object>(cacheKey);
   if (cached) return res.json(cached);
 
-  const news = await alphaVantageService.fetchStockNews(tickers, limit);
+  // Stored articles from the free market feeds (the `markets` job), in the old Alpha Vantage response shape.
+  const rows = await articleService.getMarketArticles(limit);
+  const news = rows.map((a) => ({
+    id: a.id, title: a.title, description: a.content ?? '', image_path: a.imageUrl ?? '', url: a.url,
+    source: hostname(a.url), published_at: a.publishedAt, ticker: null, sentiment: (a.sentiment ?? 'neutral').toUpperCase(),
+  }));
   const response = { success: true, count: news.length, news };
   await setCached(cacheKey, response, 900);
   return res.json(response);

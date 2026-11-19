@@ -1,47 +1,26 @@
 import 'dotenv/config';
 import { rawClient } from '../db/client';
-import { embedText } from '../services/embedding.service';
+import { activeEmbeddingModel } from '../services/embedding.service';
+import { backfillEmbeddings } from '../services/embedding-sync.service';
 import { logger } from '../utils/logger';
 
-const BATCH_SIZE = 10;
-
-async function backfill() {
-  logger.info('🔍 Fetching articles without embeddings...');
-
-  const result = await rawClient.execute(
-    `SELECT id, title, content FROM articles WHERE embedding IS NULL ORDER BY published_at DESC`
-  );
-
-  const rows = result.rows as unknown as Array<{ id: string; title: string; content: string | null }>;
-  logger.info(`Found ${rows.length} articles to embed`);
-
-  let done = 0;
-  for (let i = 0; i < rows.length; i += BATCH_SIZE) {
-    const batch = rows.slice(i, i + BATCH_SIZE);
-    await Promise.all(
-      batch.map(async (row) => {
-        try {
-          const text = `${row.title} ${row.content || ''}`;
-          const embedding = await embedText(text);
-          const vectorJson = `[${embedding.join(',')}]`;
-          await rawClient.execute({
-            sql: `UPDATE articles SET embedding = vector(?) WHERE id = ?`,
-            args: [vectorJson, row.id],
-          });
-          done++;
-        } catch (err: any) {
-          logger.warn(`Failed to embed article ${row.id}: ${err.message}`);
-        }
-      })
-    );
-    logger.info(`Progress: ${Math.min(i + BATCH_SIZE, rows.length)}/${rows.length}`);
+// Embeds every article without a vector, using the active provider
+// (Cloudflare Workers AI if configured, else Hugging Face). If the provider
+// changed since vectors were stored, the old ones are cleared first.
+async function main() {
+  const model = activeEmbeddingModel();
+  if (!model) throw new Error('No embedding provider configured (CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN, or HUGGING_FACE_API_KEY)');
+  logger.info(`🔍 Backfilling embeddings with ${model}`);
+  let total = 0;
+  for (;;) {
+    const { embedded, remaining } = await backfillEmbeddings(rawClient, 500);
+    total += embedded;
+    if (embedded === 0 || remaining === 0) break;
   }
-
-  logger.info(`✅ Backfill complete. Embedded ${done}/${rows.length} articles.`);
-  process.exit(0);
+  logger.info(`✅ Backfill complete: ${total} articles embedded`);
 }
 
-backfill().catch((err) => {
-  logger.error('Backfill failed:', err.message);
+main().then(() => process.exit(0)).catch((err) => {
+  logger.error(`Backfill failed: ${err.message}`);
   process.exit(1);
 });

@@ -11,6 +11,8 @@ export const LLM_CONFIGS = {
   eli5:         { temperature: 0.3, maxTokens: 120  },
   questions:    { temperature: 0.2, maxTokens: 200  },
   catchUpBrief: { temperature: 0.2, maxTokens: 120  },
+  enrich:       { temperature: 0.1, maxTokens: 900  },
+  ask:          { temperature: 0.1, maxTokens: 350  },
 } as const;
 
 const retryOn429 = (error: any) => {

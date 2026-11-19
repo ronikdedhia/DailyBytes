@@ -1,7 +1,8 @@
 import { logger } from '../../../utils/logger';
 import { newsDataService } from '../../../services/newsdata.service';
 import { alphaVantageService } from '../../../services/alpha-vantage.service';
-import { rssService } from '../../../services/rss.service';
+import { rssService, RSS_FEEDS, MARKET_FEEDS } from '../../../services/rss.service';
+import { feedHealthService } from '../../../services/feed-health.service';
 import { Article } from '../../../types';
 import { PipelineState, PipelineError } from '../state';
 
@@ -11,8 +12,10 @@ export async function fetchNode(state: PipelineState): Promise<Partial<PipelineS
 
     if (state.source === 'newsdata') {
       rawArticles = await newsDataService.fetchLatestNews(10);
-    } else if (state.source === 'rss') {
-      rawArticles = await rssService.fetchCandidates();
+    } else if (state.source === 'rss' || state.source === 'markets') {
+      const { articles, status } = await rssService.fetchWithStatus(state.source === 'rss' ? RSS_FEEDS : MARKET_FEEDS);
+      rawArticles = articles;
+      await feedHealthService.record(status).catch((err) => logger.warn(`⚠ [fetch] feed health not saved: ${err.message}`));
     } else {
       const stockNews = await alphaVantageService.fetchStockNews(['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'AMZN'], 10);
       rawArticles = stockNews.map(news => ({

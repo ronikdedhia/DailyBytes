@@ -41,24 +41,27 @@ export async function executeNewsDataJob(): Promise<JobOutcome> {
   return outcome;
 }
 
-/**
- * Execute the RSS pipeline (free Indian outlet feeds)
- */
-export async function executeRssJob(): Promise<JobOutcome> {
+async function runPipelineJob(name: string, run: () => Promise<{ processed: number; saved: number; errors: number; telegramSent: number }>): Promise<JobOutcome> {
   let outcome: JobOutcome = { status: 'skipped' };
-  await runExclusive('rss-pipeline', async () => {
+  await runExclusive(`${name}-pipeline`, async () => {
     try {
-      logger.info('🔄 RSS pipeline job started');
-      const result = await pipelineService.executeRssPipeline();
+      logger.info(`🔄 ${name} pipeline job started`);
+      const result = await run();
       outcome = pipelineOutcome(result);
-      logger.info(`✅ RSS done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
+      logger.info(`✅ ${name} done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
     } catch (error: any) {
-      logger.error(`❌ RSS pipeline job failed: ${error.message}`);
+      logger.error(`❌ ${name} pipeline job failed: ${error.message}`);
       outcome = { status: 'failed', error: error.message };
     }
   });
   return outcome;
 }
+
+/** RSS pipeline (free Indian outlet feeds) */
+export const executeRssJob = () => runPipelineJob('rss', () => pipelineService.executeRssPipeline());
+
+/** Market news pipeline (free ET Markets / Mint / BusinessLine feeds; replaces Alpha Vantage) */
+export const executeMarketsJob = () => runPipelineJob('markets', () => pipelineService.executeMarketsPipeline());
 
 /**
  * Execute Alpha Vantage pipeline

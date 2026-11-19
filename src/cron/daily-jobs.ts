@@ -12,12 +12,16 @@ import { getNewsletterCronExpression } from './newsletter.cron';
 export function dailySchedule(): Array<{ job: string; utc: string }> {
   return [
     { job: 'newsletter', utc: process.env.NEWSLETTER_SEND_TIME || '06:30' }, // 12:00 PM IST
-    { job: 'alpha-vantage', utc: '07:30' },                                   //  1:00 PM IST
+    { job: 'markets', utc: '07:30' },                                         //  1:00 PM IST
     { job: 'news-data', utc: '08:30' },                                       //  2:00 PM IST
     // Before the 08:45 Vercel wake-up, so one wake runs news-data, rss and the digest in order.
     { job: 'rss', utc: '08:35' },                                             //  2:05 PM IST
     { job: 'telegram-digest', utc: '08:40' },                                 //  2:10 PM IST
+    { job: 'telegram-weekly', utc: '08:42' },                                 //  2:12 PM IST, sends on Sundays only
+    { job: 'embed-backfill', utc: '08:44' },                                  //  2:14 PM IST
     { job: 'cleanup', utc: '12:30' },                                         //  6:00 PM IST
+    // After every run of the day, before the 12:45 Vercel wake-up.
+    { job: 'health-check', utc: '12:35' },                                    //  6:05 PM IST
   ];
 }
 
