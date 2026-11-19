@@ -17,7 +17,7 @@ vi.mock('../src/chains/eli5.chain', () => ({ generateELI5: track('eli5', 'eli5')
 vi.mock('../src/chains/questions.chain', () => ({ generateQuestions: track('questions', []) }));
 vi.mock('../src/services/embedding.service', () => ({ embedText: vi.fn(async () => []) }));
 
-import { parseEnrichResult } from '../src/chains/enrich.chain';
+import { parseEnrichResult, enrichArticleOnce } from '../src/chains/enrich.chain';
 import { enrichFields } from '../src/agents/pipeline/nodes/enrich.node';
 
 const summary = 'The Reserve Bank of India kept its key lending rate unchanged at 6.5 percent for the fourth meeting in a row, citing food inflation above target, and signalled a possible cut next year if prices ease.';
@@ -48,7 +48,7 @@ describe('parseEnrichResult', () => {
 });
 
 describe('enrichFields', () => {
-  beforeEach(() => { fallback.calls.length = 0; once.fail = false; once.value = parseEnrichResult(GOOD); });
+  beforeEach(() => { fallback.calls.length = 0; once.fail = false; once.value = parseEnrichResult(GOOD); vi.mocked(enrichArticleOnce).mockClear(); });
 
   it('uses the single call and no per-field chains when everything is valid', async () => {
     const { fields, fallbacks } = await enrichFields('Headline', 'Body');
@@ -67,10 +67,18 @@ describe('enrichFields', () => {
     expect(fields.title).toBe('RBI repo rate');
   });
 
-  it('runs every per-field chain when the single call fails', async () => {
+  it('retries the single call, then throws without running eight more calls', async () => {
     once.fail = true;
-    const { fields } = await enrichFields('Headline', 'Body');
-    expect(fallback.calls.sort()).toEqual(['analyze', 'bias', 'eli5', 'hashtags', 'questions', 'summary', 'title', 'why']);
-    expect(fields.sentiment).toBe('negative');
+    await expect(enrichFields('Headline', 'Body', [1, 1])).rejects.toThrow('groq down');
+    expect(vi.mocked(enrichArticleOnce)).toHaveBeenCalledTimes(3);
+    expect(fallback.calls).toEqual([]);
+  });
+
+  it('succeeds when a retry works', async () => {
+    let n = 0;
+    vi.mocked(enrichArticleOnce).mockImplementationOnce(async () => { n++; throw new Error('429'); });
+    const { fields } = await enrichFields('Headline', 'Body', [1]);
+    expect(n).toBe(1);
+    expect(fields.title).toBe('RBI repo rate');
   });
 });
