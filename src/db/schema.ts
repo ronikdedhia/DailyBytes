@@ -208,7 +208,7 @@ export const pipelineRuns = sqliteTable(
   'pipeline_runs',
   {
     id: text('id').primaryKey(),
-    source: text('source').notNull(), // 'newsdata' | 'alpha_vantage'
+    source: text('source').notNull(), // 'newsdata' | 'rss' | 'markets' (older rows: 'alphavantage')
     status: text('status').notNull().default('running'), // 'running' | 'success' | 'failed'
     processed: integer('processed').notNull().default(0),
     saved: integer('saved').notNull().default(0),

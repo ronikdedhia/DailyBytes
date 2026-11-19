@@ -15,7 +15,7 @@ An AI-powered news aggregation platform built with Next.js 14, Clerk auth, and a
 | Icons | Lucide React |
 | Image capture | html2canvas + jsPDF |
 | TTS | ElevenLabs API (falls back to Web Speech API) |
-| Embeddings | `@huggingface/transformers` (all-MiniLM-L6-v2, local) |
+| Embeddings (backend) | `@huggingface/transformers` running `bge-small-en-v1.5` in-process |
 | Cache | Upstash Redis (REST API, graceful no-op if unconfigured) |
 
 ---
@@ -71,7 +71,7 @@ All caching is optional — if `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TO
 | `cache:articles:free:{limit}:{offset}` | `GET /api/articles` (anon) | 5 min | Pipeline trigger |
 | `cache:trending:articles:{limit}:{offset}` | `GET /api/articles/trending` (anon) | 5 min | Pipeline trigger |
 | `cache:hashtags:{hours}` | `GET /api/trending-hashtags` | 10 min | Pipeline trigger |
-| `cache:stock:{tickers}:{limit}` | `GET /api/stock-news` | 15 min | Never (Alpha Vantage rate-limit buffer) |
+| `cache:stock:markets:{limit}` | `GET /api/stock-news` | 15 min | Never |
 | `cache:personalized:{userId}` | `GET /api/articles/personalized` | 5 min | React, bookmark, pipeline trigger |
 | `cache:metrics` | `GET /api/metrics` | 5 min | Pipeline trigger |
 | `cache:weekly-wrap:{userId}` | `GET /api/auth/weekly-wrap` | 30 min | Manual (acceptable staleness) |
@@ -203,7 +203,7 @@ Backend base URL: `NEXT_PUBLIC_API_URL` (default `http://localhost:3001`)
 | POST | `/api/articles/:id/dismiss` | required | Dismiss article from feed |
 | GET | `/api/search?q=&mode=keyword\|semantic` | required | Keyword or semantic search |
 | GET | `/api/trending-hashtags` | optional | Top hashtags (last 48 h) |
-| GET | `/api/stock-news` | optional | Alpha Vantage stock news |
+| GET | `/api/stock-news` | optional | Latest market news (ET Markets, Mint, BusinessLine) |
 | GET/POST/DELETE | `/api/bookmarks` | required | Bookmark management |
 | GET/POST/DELETE | `/api/folders` | required | Bookmark folder management |
 | PUT | `/api/bookmarks/:id/folder` | required | Assign bookmark to folder |

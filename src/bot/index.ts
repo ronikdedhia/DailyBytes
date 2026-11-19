@@ -19,7 +19,7 @@ export const botService = new BotService({
 /** Called on boot. Outbound network can lag right after a Render wake, so retry. */
 export async function initializeTelegramBot(): Promise<void> {
   if (!botEnabled()) {
-    logger.info('[bot] TELEGRAM_BOT_TOKEN not set — two-way bot disabled (channel broadcasts still work)');
+    logger.info('[bot] no bot token (TELEGRAM_ACCESS_TOKEN) — two-way bot disabled');
     return;
   }
   for (let attempt = 1; attempt <= 3; attempt++) {

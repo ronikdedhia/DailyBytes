@@ -7,8 +7,24 @@ export const DEFAULT_GROQ_MODEL = 'qwen/qwen3.8-27b';
 // makes every LLM call fail, so fall back to the default instead.
 const RETIRED_GROQ_MODELS = new Set(['llama-3.1-8b-instant', 'llama3-8b-8192', 'llama3-70b-8192', 'mixtral-8x7b-32768']);
 
+// Groq model ids include the provider prefix ("qwen/qwen3.8-27b"); without it the
+// API answers model_not_found and every AI call fails. Add the prefix for known families.
+const GROQ_MODEL_PREFIXES: Array<[RegExp, string]> = [
+  [/^qwen/i, 'qwen/'],
+  [/^gpt-oss/i, 'openai/'],
+  [/^(llama-4|llama-guard|llama-prompt-guard)/i, 'meta-llama/'],
+];
+
 export function resolveGroqModel(requested: string | undefined): string {
+  requested = requested?.trim();
   if (!requested) return DEFAULT_GROQ_MODEL;
+  if (!requested.includes('/')) {
+    const prefix = GROQ_MODEL_PREFIXES.find(([re]) => re.test(requested!))?.[1];
+    if (prefix) {
+      console.warn(`⚠  GROQ_MODEL=${requested} is missing its provider prefix - using ${prefix}${requested}. Update GROQ_MODEL.`);
+      requested = prefix + requested;
+    }
+  }
   if (RETIRED_GROQ_MODELS.has(requested)) {
     console.warn(`⚠  GROQ_MODEL=${requested} has been retired by Groq - using ${DEFAULT_GROQ_MODEL}. Update GROQ_MODEL.`);
     return DEFAULT_GROQ_MODEL;
@@ -28,9 +44,6 @@ export const config = {
   groq: {
     apiKey: process.env.GROQ_API_KEY || '',
     model: resolveGroqModel(process.env.GROQ_MODEL),
-  },
-  huggingface: {
-    apiKey: process.env.HUGGING_FACE_API_KEY || '',
   },
   database: {
     url: process.env.DATABASE_URL,
@@ -70,6 +83,3 @@ if (!process.env.CLERK_JWT_KEY && !process.env.CLERK_SECRET_KEY) {
   console.warn('⚠  CLERK_JWT_KEY / CLERK_SECRET_KEY not set - all authenticated requests will be rejected.');
 }
 // Warn if optional but recommended env vars are missing
-if (!process.env.HUGGING_FACE_API_KEY) {
-  console.warn('⚠️  HUGGING_FACE_API_KEY not set - hashtag generation will fail. Add it to .env to enable hashtag feature.');
-}

@@ -5,6 +5,8 @@ import { formatArticleList, escapeHtml, BriefArticle } from './format';
 import { matchesAny, matchesTerm, normalizeTerm, MAX_TERMS_PER_KIND, MatchableArticle } from './matching';
 import { botEnabled, botToken, callBot, sendHtml, SendResult } from './telegram-api';
 import { questionKeywords } from './keywords';
+import { EARNINGSLENS_COMMANDS, forwardUrl, ownerChats, setDetectedForwardUrl, FORWARD_URL_KEY } from './router';
+import { jobStateService } from '../services/job-state.service';
 
 export type BotArticle = BriefArticle & MatchableArticle & {
   publishedAt?: string | Date | null;
@@ -101,7 +103,9 @@ export class BotService {
       case 'start':
         return `Hi${chat.firstName ? ` ${escapeHtml(chat.firstName)}` : ''}! ${HELP}`;
       case 'help':
-        return HELP;
+        return ownerChats().has(chat.chatId) && forwardUrl()
+          ? `${HELP}\n\n<b>EarningsLens (only you see these)</b>\n${EARNINGSLENS_COMMANDS.map((c) => `/${c.command}: ${escapeHtml(c.description.replace('EarningsLens: ', ''))}`).join('\n')}`
+          : HELP;
       case 'brief':
         return this.brief(chat.chatId, arg);
       case 'ask':
@@ -309,20 +313,40 @@ export function publicBackendUrl(): string | null {
 }
 
 /**
- * Point the bot's webhook at this backend and publish the command menu.
- * Refuses to replace a webhook that points at a different host (another app
- * using the same token) unless TELEGRAM_BOT_TAKEOVER=1.
+ * Point the bot's webhook at this backend and publish the command menus: the
+ * Daily Bytes commands for everyone, plus the forwarded EarningsLens commands
+ * in the owner's chat. Another app's webhook is only replaced when its
+ * commands are forwarded (TELEGRAM_FORWARD_URL on that host) or with
+ * TELEGRAM_BOT_TAKEOVER=1, so nothing is silently cut off.
  */
 export async function registerWebhook(): Promise<string> {
-  if (!botEnabled()) return 'skipped: TELEGRAM_BOT_TOKEN not set';
+  if (!botEnabled()) return 'skipped: no bot token';
   const base = publicBackendUrl();
   if (!base) return 'skipped: BACKEND_PUBLIC_URL / RENDER_EXTERNAL_URL not set';
   const url = `${base}/api/telegram/webhook`;
   const info = await callBot<{ url?: string }>('getWebhookInfo');
-  if (info.url && new URL(info.url).host !== new URL(url).host && process.env.TELEGRAM_BOT_TAKEOVER !== '1') {
-    throw new Error(`bot webhook already points at ${new URL(info.url).host}; use a separate bot token (or set TELEGRAM_BOT_TAKEOVER=1)`);
+  const currentHost = info.url ? new URL(info.url).host : null;
+  if (!process.env.TELEGRAM_FORWARD_URL) {
+    const stored = await jobStateService.get(FORWARD_URL_KEY).catch(() => null);
+    if (stored) setDetectedForwardUrl(stored);
+    // First takeover: the webhook belongs to the other app (EarningsLens). Keep
+    // its URL and forward its commands there, so both apps share the bot.
+    if (!stored && info.url && currentHost !== new URL(url).host && process.env.TELEGRAM_BOT_TAKEOVER !== '0') {
+      setDetectedForwardUrl(info.url);
+      await jobStateService.set(FORWARD_URL_KEY, info.url);
+    }
+  }
+  const forwardHost = forwardUrl() ? new URL(forwardUrl()!).host : null;
+  if (currentHost && currentHost !== new URL(url).host && currentHost !== forwardHost && process.env.TELEGRAM_BOT_TAKEOVER !== '1') {
+    throw new Error(`bot webhook points at ${currentHost}, which is not the forward target ${forwardHost}; set TELEGRAM_FORWARD_URL or TELEGRAM_BOT_TAKEOVER=1`);
   }
   await callBot('setWebhook', { url, secret_token: webhookSecret(), allowed_updates: ['message'] });
   await callBot('setMyCommands', { commands: COMMANDS });
-  return `registered → ${url}`;
+  if (forwardHost) {
+    for (const chatId of ownerChats()) {
+      await callBot('setMyCommands', { commands: [...COMMANDS, ...EARNINGSLENS_COMMANDS].slice(0, 100), scope: { type: 'chat', chat_id: chatId } })
+        .catch(() => {});
+    }
+  }
+  return `registered → ${url}${forwardHost ? ` (forwarding EarningsLens commands to ${forwardHost})` : ''}`;
 }

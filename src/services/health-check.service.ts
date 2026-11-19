@@ -2,6 +2,7 @@ import axios from 'axios';
 import { rawClient } from '../db/client';
 import { logger } from '../utils/logger';
 import { feedHealthService, FeedHealthMap } from './feed-health.service';
+import { config } from '../config';
 
 export const FEED_FAIL_DAYS_ALERT = 3;
 
@@ -56,6 +57,52 @@ export async function sendAdminMessage(text: string): Promise<boolean> {
   return Boolean(data?.ok);
 }
 
+export interface ServiceCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Brevo, checked from the server itself (Brevo's IP allow-list blocks other
+ * machines): key accepted, sender verified, email credits left.
+ */
+export async function checkBrevo(): Promise<ServiceCheck> {
+  const key = process.env.BREVO_API_KEY;
+  const from = (process.env.BREVO_FROM_EMAIL || '').toLowerCase();
+  if (!key) return { name: 'brevo', ok: false, detail: 'BREVO_API_KEY is not set' };
+  const get = (path: string) => axios.get(`https://api.brevo.com/v3${path}`, { headers: { 'api-key': key }, timeout: 15_000, validateStatus: () => true });
+  const account = await get('/account');
+  if (account.status !== 200) {
+    return { name: 'brevo', ok: false, detail: `account check HTTP ${account.status}: ${String(account.data?.message ?? '').slice(0, 200)}` };
+  }
+  const plans: Array<{ type?: string; credits?: number; creditsType?: string }> = account.data?.plan ?? [];
+  const emailCredits = plans.filter((p) => p.creditsType === 'sendLimit' || p.type === 'free' || p.type === 'payAsYouGo')
+    .reduce((n, p) => n + (Number(p.credits) || 0), 0);
+  const senders = await get('/senders');
+  const sender = (senders.data?.senders ?? []).find((x: any) => String(x.email).toLowerCase() === from);
+  const problems: string[] = [];
+  if (!from) problems.push('BREVO_FROM_EMAIL is not set');
+  else if (!sender) problems.push(`sender ${from} is not in the Brevo account`);
+  else if (!sender.active) problems.push(`sender ${from} is not verified`);
+  if (plans.length && emailCredits <= 0) problems.push('no email credits left');
+  return {
+    name: 'brevo',
+    ok: problems.length === 0,
+    detail: problems.length ? problems.join('; ') : `OK: ${account.data?.email}, sender ${from} verified, ${emailCredits} email credits`,
+  };
+}
+
+/** The configured Groq model answers. */
+export async function checkGroq(): Promise<ServiceCheck> {
+  const res = await axios.post('https://api.groq.com/openai/v1/chat/completions', {
+    model: config.groq.model, max_tokens: 3, messages: [{ role: 'user', content: 'Reply with OK' }],
+  }, { headers: { Authorization: `Bearer ${config.groq.apiKey}` }, timeout: 20_000, validateStatus: () => true });
+  return res.status === 200
+    ? { name: 'groq', ok: true, detail: `OK: ${config.groq.model}` }
+    : { name: 'groq', ok: false, detail: `${config.groq.model}: HTTP ${res.status} ${String(res.data?.error?.message ?? '').slice(0, 200)}` };
+}
+
 class HealthCheckService {
   async lastDayRuns(now: Date): Promise<RunRow[]> {
     const since = new Date(now.getTime() - 24 * 3_600_000).toISOString();
@@ -67,8 +114,14 @@ class HealthCheckService {
   }
 
   /** Check, and message the admin only if something is wrong. */
-  async run(now: Date = new Date()): Promise<HealthReport & { alerted: boolean }> {
+  async run(now: Date = new Date()): Promise<HealthReport & { alerted: boolean; services: ServiceCheck[] }> {
     const report = assessHealth(await this.lastDayRuns(now), await feedHealthService.get());
+    const services = await Promise.all([checkBrevo(), checkGroq()].map((p) =>
+      p.catch((err: any) => ({ name: 'check', ok: false, detail: String(err.message ?? err) }))));
+    for (const svc of services) {
+      if (!svc.ok) report.problems.push(`${svc.name}: ${svc.detail}`);
+    }
+    report.ok = report.problems.length === 0;
     let alerted = false;
     if (!report.ok) {
       logger.warn(`🩺 [health] ${report.problems.length} problem(s): ${report.problems.join(' | ')}`);
@@ -77,7 +130,7 @@ class HealthCheckService {
     } else {
       logger.info(`🩺 [health] OK: ${report.savedLast24h} articles saved in ${report.runsLast24h} runs`);
     }
-    return { ...report, alerted };
+    return { ...report, alerted, services };
   }
 }
 

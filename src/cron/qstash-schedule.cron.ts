@@ -1,6 +1,6 @@
 import { Client } from '@upstash/qstash';
 import { logger } from '../utils/logger';
-import { getNewsletterCronExpression } from './newsletter.cron';
+import { dailyRunTime } from './daily-jobs';
 
 async function registerSchedule(qstash: Client, destination: string, cron: string, label: string) {
   const existing = await qstash.schedules.list();
@@ -25,13 +25,8 @@ export async function initializeQStashSchedules() {
   const qstash = new Client({ token });
 
   try {
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/markets`,              '30 7 * * *',  'Market news pipeline — 1:00 PM IST daily');
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/news-data`,            '30 8 * * *',  'NewsData pipeline — 2:00 PM IST daily');
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/cleanup`,              '30 12 * * *', 'Article cleanup check — 6:00 PM IST daily');
-
-    const sendTime = process.env.NEWSLETTER_SEND_TIME || '06:30';
-    const newsletterCron = getNewsletterCronExpression(sendTime);
-    await registerSchedule(qstash, `${backendUrl}/api/qstash/newsletter`, newsletterCron, `Newsletter — ${sendTime} UTC daily`);
+    const [h, m] = dailyRunTime().split(':').map(Number);
+    await registerSchedule(qstash, `${backendUrl}/api/qstash/daily`, `${m} ${h} * * *`, `Daily run — ${dailyRunTime()} UTC`);
   } catch (error: any) {
     logger.error(`❌ [qstash] schedule registration failed: ${error.message}`);
   }

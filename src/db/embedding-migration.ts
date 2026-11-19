@@ -1,8 +1,8 @@
 import type { Client } from '@libsql/client';
 
 export const EMBEDDING_INDEX = 'articles_embedding_idx';
-// mixedbread-ai/mxbai-embed-large-v1 output size.
-export const EMBEDDING_DIM = 1024;
+// BAAI/bge-small-en-v1.5 output size (see services/embedding.service.ts).
+export const EMBEDDING_DIM = 384;
 
 /**
  * Makes articles.embedding an F32_BLOB(dim) column with a vector index.

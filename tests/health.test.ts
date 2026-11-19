@@ -45,3 +45,28 @@ describe('questionKeywords', () => {
     expect(questionKeywords('Who won IPL 2026?')).toEqual(['won', 'ipl', '2026']);
   });
 });
+
+import { vi } from 'vitest';
+const get = vi.hoisted(() => vi.fn());
+vi.mock('axios', () => ({ default: { get, post: vi.fn() } }));
+import { checkBrevo } from '../src/services/health-check.service';
+
+describe('checkBrevo', () => {
+  it('reports the IP allow-list block', async () => {
+    process.env.BREVO_API_KEY = 'k';
+    process.env.BREVO_FROM_EMAIL = 'me@example.com';
+    get.mockResolvedValueOnce({ status: 401, data: { message: 'We have detected you are using an unrecognised IP address' } });
+    const r = await checkBrevo();
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain('unrecognised IP');
+  });
+
+  it('flags an unverified sender and passes a healthy account', async () => {
+    get.mockResolvedValueOnce({ status: 200, data: { email: 'me@example.com', plan: [{ type: 'free', creditsType: 'sendLimit', credits: 300 }] } })
+       .mockResolvedValueOnce({ status: 200, data: { senders: [{ email: 'Me@Example.com', active: false }] } });
+    expect((await checkBrevo()).detail).toContain('not verified');
+    get.mockResolvedValueOnce({ status: 200, data: { email: 'me@example.com', plan: [{ type: 'free', creditsType: 'sendLimit', credits: 300 }] } })
+       .mockResolvedValueOnce({ status: 200, data: { senders: [{ email: 'me@example.com', active: true }] } });
+    expect(await checkBrevo()).toMatchObject({ ok: true, detail: expect.stringContaining('300 email credits') });
+  });
+});

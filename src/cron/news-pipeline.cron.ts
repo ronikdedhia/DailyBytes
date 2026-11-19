@@ -60,27 +60,8 @@ async function runPipelineJob(name: string, run: () => Promise<{ processed: numb
 /** RSS pipeline (free Indian outlet feeds) */
 export const executeRssJob = () => runPipelineJob('rss', () => pipelineService.executeRssPipeline());
 
-/** Market news pipeline (free ET Markets / Mint / BusinessLine feeds; replaces Alpha Vantage) */
+/** Market news pipeline (free ET Markets / Mint / BusinessLine feeds) */
 export const executeMarketsJob = () => runPipelineJob('markets', () => pipelineService.executeMarketsPipeline());
-
-/**
- * Execute Alpha Vantage pipeline
- */
-export async function executeAlphaVantageJob(): Promise<JobOutcome> {
-  let outcome: JobOutcome = { status: 'skipped' };
-  await runExclusive('alphavantage-pipeline', async () => {
-    try {
-      logger.info('🔄 Alpha Vantage pipeline job started');
-      const result = await pipelineService.executeAlphaVantagePipeline();
-      outcome = pipelineOutcome(result);
-      logger.info(`✅ Alpha Vantage done: ${result.processed} processed, ${result.saved} saved, ${result.telegramSent} Telegram sent, ${result.errors} errors`);
-    } catch (error: any) {
-      logger.error(`❌ Alpha Vantage pipeline job failed: ${error.message}`);
-      outcome = { status: 'failed', error: error.message };
-    }
-  });
-  return outcome;
-}
 
 export type CleanupDecision = 'initialize' | 'run' | 'skip';
 

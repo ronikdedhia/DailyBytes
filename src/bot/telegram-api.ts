@@ -1,11 +1,10 @@
 import axios from 'axios';
 
 /**
- * Bot API client for the two-way Daily Bytes bot. It uses TELEGRAM_BOT_TOKEN,
- * not TELEGRAM_ACCESS_TOKEN: that token is the channel broadcaster, and its
- * webhook belongs to another app, which a second webhook would replace.
+ * Bot API client for the two-way bot. By default this is the same bot that
+ * posts to the channel (TELEGRAM_ACCESS_TOKEN); TELEGRAM_BOT_TOKEN overrides it.
  */
-export const botToken = () => process.env.TELEGRAM_BOT_TOKEN || '';
+export const botToken = () => process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_ACCESS_TOKEN || '';
 export const botEnabled = () => botToken().length > 0;
 
 export type SendResult = 'sent' | 'blocked' | 'failed';

@@ -3,6 +3,7 @@ import { logger } from '../utils/logger';
 import { validWebhookSecret } from '../bot/bot.service';
 import { botService } from '../bot';
 import { sendHtml } from '../bot/telegram-api';
+import { routeMessage, forwardUpdate } from '../bot/router';
 
 const router = Router();
 
@@ -19,6 +20,18 @@ router.post('/telegram/webhook', (req: Request, res: Response) => {
 
   const message = req.body?.message;
   if (!message?.chat || message.chat.type !== 'private' || typeof message.text !== 'string') return;
+  const route = routeMessage(String(message.chat.id), message.text);
+  if (route.to === 'forward') {
+    forwardUpdate(req.body, route.text).catch((err) => {
+      logger.error(`❌ [bot] forward to EarningsLens failed: ${err.message}`);
+      return sendHtml(String(message.chat.id), 'EarningsLens did not answer. It may be waking up; please try again in a minute.');
+    });
+    return;
+  }
+  if (route.to === 'owner-only') {
+    void sendHtml(String(message.chat.id), 'That command is not available here. Send /help to see what this bot can do.');
+    return;
+  }
   const chat = {
     chatId: String(message.chat.id),
     username: message.chat.username,

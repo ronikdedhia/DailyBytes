@@ -1,7 +1,7 @@
 import { Annotation } from '@langchain/langgraph';
 import { Article } from '../../types';
 
-export type PipelineSource = 'newsdata' | 'alphavantage' | 'rss' | 'markets';
+export type PipelineSource = 'newsdata' | 'rss' | 'markets';
 
 export interface EnrichedArticle {
   raw: Article;

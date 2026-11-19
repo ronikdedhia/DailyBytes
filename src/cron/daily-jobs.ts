@@ -1,37 +1,47 @@
 import cron from 'node-cron';
 import { logger } from '../utils/logger';
 import { jobStateService } from '../services/job-state.service';
+import { runExclusive } from '../lib/job-lock';
 import { SCHEDULED_JOBS } from './jobs';
 import type { JobOutcome } from './news-pipeline.cron';
 import { getNewsletterCronExpression } from './newsletter.cron';
 
 /**
- * Daily schedule in UTC. node-cron, GitHub Actions, QStash and Vercel cron all
- * aim at these times; whichever gets here first does the work.
+ * Render's free tier sleeps when idle, so everything runs in ONE daily slot:
+ * a single wake-up (GitHub Actions, with Vercel Cron as backup) runs every job
+ * in this order, then the server goes back to sleep. Order matters: content
+ * first, then what's built from it.
  */
+export const DAILY_JOBS = [
+  'markets',          // market news feeds
+  'news-data',        // NewsData.io
+  'rss',              // outlet RSS feeds
+  'embed-backfill',   // vectors for anything not embedded yet
+  'newsletter',       // email digest, now with today's articles
+  'telegram-digest',  // personal bot digests
+  'telegram-weekly',  // Sundays only
+  'cleanup',          // every 15 days
+  'health-check',     // last: sees every run of the day
+] as const;
+
+/** UTC time of the daily slot. Default 08:30 UTC = 2:00 PM IST. */
+export function dailyRunTime(): string {
+  const t = (process.env.DAILY_RUN_TIME || '08:30').trim();
+  return /^\d{1,2}:\d{2}$/.test(t) ? t : '08:30';
+}
+
+/** Kept for callers that list the schedule: every job is due at the daily slot. */
 export function dailySchedule(): Array<{ job: string; utc: string }> {
-  return [
-    { job: 'newsletter', utc: process.env.NEWSLETTER_SEND_TIME || '06:30' }, // 12:00 PM IST
-    { job: 'markets', utc: '07:30' },                                         //  1:00 PM IST
-    { job: 'news-data', utc: '08:30' },                                       //  2:00 PM IST
-    // Before the 08:45 Vercel wake-up, so one wake runs news-data, rss and the digest in order.
-    { job: 'rss', utc: '08:35' },                                             //  2:05 PM IST
-    { job: 'telegram-digest', utc: '08:40' },                                 //  2:10 PM IST
-    { job: 'telegram-weekly', utc: '08:42' },                                 //  2:12 PM IST, sends on Sundays only
-    { job: 'embed-backfill', utc: '08:44' },                                  //  2:14 PM IST
-    { job: 'cleanup', utc: '12:30' },                                         //  6:00 PM IST
-    // After every run of the day, before the 12:45 Vercel wake-up.
-    { job: 'health-check', utc: '12:35' },                                    //  6:05 PM IST
-  ];
+  return DAILY_JOBS.map((job) => ({ job, utc: dailyRunTime() }));
 }
 
 export const dailyStateKey = (job: string) => `daily:${job}:last_run_date`;
 const utcDate = (d: Date) => d.toISOString().slice(0, 10);
 
-function scheduledAt(utc: string, now: Date): Date {
-  const [h, m] = utc.split(':').map(Number);
+function slotStart(now: Date): Date {
+  const [h, m] = dailyRunTime().split(':').map(Number);
   const at = new Date(now);
-  at.setUTCHours(Number.isFinite(h) ? h : 0, Number.isFinite(m) ? m : 0, 0, 0);
+  at.setUTCHours(h, m, 0, 0);
   return at;
 }
 
@@ -54,61 +64,48 @@ export async function runDailyJob(job: string, now: Date = new Date()): Promise<
   return outcome;
 }
 
+export interface DailyRunResult {
+  job: string;
+  outcome: JobOutcome;
+}
+
 /**
- * Run every job whose time has passed today but which hasn't run yet.
- * Render's free tier sleeps, and in-process cron can't fire while asleep, so this
- * runs on boot (any request wakes the server) and every 15 minutes while awake.
+ * If today's slot has started, run every job that hasn't completed today, in
+ * DAILY_JOBS order. Runs on boot (a wake-up after the slot), from node-cron at
+ * the slot, from POST /api/cron/daily, and every 15 minutes while awake. Only
+ * one run at a time; jobs that already ran are skipped cheaply.
  */
-export async function catchUpMissedJobs(now: Date = new Date()): Promise<string[]> {
-  const ran: string[] = [];
-  const due = dailySchedule()
-    .filter(({ utc }) => scheduledAt(utc, now) <= now)
-    .sort((a, b) => a.utc.localeCompare(b.utc));
-  for (const { job } of due) {
-    try {
-      if ((await jobStateService.get(dailyStateKey(job))) === utcDate(now)) continue;
-      logger.info(`⏰ Catch-up: ${job} was due at ${scheduledAtLabel(job)} UTC and hasn't run today`);
-      const outcome = await runDailyJob(job, now);
-      if (outcome.status !== 'skipped') ran.push(job);
-    } catch (error: any) {
-      logger.error(`❌ Catch-up for ${job} failed: ${error.message}`);
-    }
-  }
-  return ran;
-}
-
-function scheduledAtLabel(job: string): string {
-  return dailySchedule().find((s) => s.job === job)?.utc ?? '?';
-}
-
-let catchUpRunning = false;
-
-/** Start catch-up now and every 15 minutes. Never runs two catch-ups at once. */
-export function startCatchUpLoop(intervalMs = 15 * 60 * 1000): NodeJS.Timeout {
-  const tick = async () => {
-    if (catchUpRunning) return;
-    catchUpRunning = true;
-    try {
-      await catchUpMissedJobs();
-    } finally {
-      catchUpRunning = false;
-    }
-  };
-  void tick();
-  return setInterval(() => void tick(), intervalMs);
-}
-
-/** In-process schedules (only fire while the server is awake; see catchUpMissedJobs). */
-export function initializeDailyCron() {
-  for (const { job, utc } of dailySchedule()) {
-    cron.schedule(getNewsletterCronExpression(utc), async () => {
-      logger.info(`⏰ Cron triggered: ${job} (${utc} UTC)`);
+export async function catchUpMissedJobs(now: Date = new Date()): Promise<DailyRunResult[]> {
+  const results: DailyRunResult[] = [];
+  if (now < slotStart(now)) return results;
+  await runExclusive('daily-run', async () => {
+    for (const job of DAILY_JOBS) {
       try {
-        await runDailyJob(job);
+        if ((await jobStateService.get(dailyStateKey(job))) === utcDate(now)) continue;
+        logger.info(`⏰ Daily run: ${job}`);
+        results.push({ job, outcome: await runDailyJob(job, now) });
       } catch (error: any) {
-        logger.error(`❌ ${job} failed: ${error.message}`);
+        logger.error(`❌ Daily run: ${job} failed: ${error.message}`);
+        results.push({ job, outcome: { status: 'failed', error: error.message } });
       }
-    }, { timezone: 'Etc/UTC' });
-    logger.info(`📅 ${job}: ${utc} UTC daily`);
-  }
+    }
+  });
+  return results;
+}
+
+/** Catch up now and every 15 minutes. The timer does not keep Render awake; only HTTP traffic does. */
+export function startCatchUpLoop(intervalMs = 15 * 60 * 1000): NodeJS.Timeout {
+  const tick = () => void catchUpMissedJobs().catch((err) => logger.error(`❌ catch-up failed: ${err.message}`));
+  tick();
+  return setInterval(tick, intervalMs);
+}
+
+/** In-process trigger at the slot (only fires if the server happens to be awake). */
+export function initializeDailyCron() {
+  const time = dailyRunTime();
+  cron.schedule(getNewsletterCronExpression(time), () => {
+    logger.info(`⏰ Cron triggered: daily run (${time} UTC)`);
+    void catchUpMissedJobs().catch((err) => logger.error(`❌ daily run failed: ${err.message}`));
+  }, { timezone: 'Etc/UTC' });
+  logger.info(`📅 Daily run at ${time} UTC: ${DAILY_JOBS.join(' → ')}`);
 }

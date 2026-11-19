@@ -57,7 +57,7 @@ export async function backfillEmbeddings(client: Client, limit = 200): Promise<{
     } catch (err: any) {
       failed += batch.length;
       logger.warn(`⚠ [embed-backfill] batch failed: ${err.message}`);
-      if (/No embedding provider|credits|401|403/i.test(err.message)) break;
+      if (/disabled|Authentication|401|403/i.test(err.message)) break;
     }
   }
   const remaining = Number((await client.execute('SELECT count(*) AS n FROM articles WHERE embedding IS NULL')).rows[0].n);

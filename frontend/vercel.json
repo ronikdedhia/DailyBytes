@@ -1,6 +1,8 @@
 {
   "crons": [
-    { "path": "/api/wake", "schedule": "45 8 * * *" },
-    { "path": "/api/wake", "schedule": "45 12 * * *" }
+    {
+      "path": "/api/wake",
+      "schedule": "50 8 * * *"
+    }
   ]
 }

@@ -26,7 +26,7 @@ router.get('/stock-news', asyncHandler(async (req, res) => {
   const cached = await getCached<object>(cacheKey);
   if (cached) return res.json(cached);
 
-  // Stored articles from the free market feeds (the `markets` job), in the old Alpha Vantage response shape.
+  // Stored articles from the free market feeds (the `markets` job), in the response shape the endpoint has always had.
   const rows = await articleService.getMarketArticles(limit);
   const news = rows.map((a) => ({
     id: a.id, title: a.title, description: a.content ?? '', image_path: a.imageUrl ?? '', url: a.url,

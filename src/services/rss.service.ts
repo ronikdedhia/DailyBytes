@@ -29,8 +29,7 @@ export const RSS_FEEDS: RssFeed[] = [
 ];
 
 /**
- * Free Indian stock-market feeds (replaces Alpha Vantage, whose news endpoint
- * became premium). Moneycontrol and Business Standard answer bots with 403.
+ * Free Indian stock-market feeds. Moneycontrol and Business Standard answer bots with 403.
  */
 export const MARKET_FEEDS: RssFeed[] = [
   { outlet: 'ET Markets', url: 'https://economictimes.indiatimes.com/markets/rssfeeds/1977021501.cms', category: 'business' },

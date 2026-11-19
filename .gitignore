@@ -53,3 +53,6 @@ temp/
 
 # LangGraph checkpoint database
 checkpoints/
+
+# Embedding model downloaded at build time
+models/

@@ -1,4 +1,4 @@
-import { executeNewsDataJob, executeAlphaVantageJob, executeCleanupJob, executeRssJob, executeMarketsJob, JobOutcome } from './news-pipeline.cron';
+import { executeNewsDataJob, executeCleanupJob, executeRssJob, executeMarketsJob, JobOutcome } from './news-pipeline.cron';
 import { botEnabled, botService } from '../bot';
 import { rawClient } from '../db/client';
 import { backfillEmbeddings } from '../services/embedding-sync.service';
@@ -22,8 +22,6 @@ import { executeScheduledNewsletterJob } from './newsletter.cron';
 export const SCHEDULED_JOBS: Record<string, () => Promise<JobOutcome>> = {
   'news-data': () => executeNewsDataJob(),
   markets: () => executeMarketsJob(),
-  // Not scheduled: NEWS_SENTIMENT needs a premium Alpha Vantage key. Run by hand if you have one.
-  'alpha-vantage': () => executeAlphaVantageJob(),
   rss: () => executeRssJob(),
   'telegram-digest': async () => {
     if (!botEnabled()) return { status: 'completed', result: { skipped: 'TELEGRAM_BOT_TOKEN not set' } };

@@ -7,11 +7,11 @@ import { join } from 'path';
 const post = vi.hoisted(() => vi.fn());
 vi.mock('axios', () => ({ default: { post } }));
 
-import { embedTexts, activeEmbeddingModel } from '../src/services/embedding.service';
+import { embedTexts, activeEmbeddingModel, activeEmbeddingProvider } from '../src/services/embedding.service';
 import { syncEmbeddingModel, backfillEmbeddings } from '../src/services/embedding-sync.service';
 import { ensureEmbeddingColumn } from '../src/db/embedding-migration';
 
-const vec = (seed: number) => Array.from({ length: 1024 }, (_, i) => ((i + seed) % 10) / 10);
+const vec = (seed: number) => Array.from({ length: 384 }, (_, i) => ((i + seed) % 10) / 10);
 const saved = { ...process.env };
 
 beforeEach(() => {
@@ -21,21 +21,33 @@ beforeEach(() => {
 });
 afterEach(() => { process.env = { ...saved }; });
 
+describe('provider choice', () => {
+  it('defaults to the in-process model with no account configured', () => {
+    delete process.env.CLOUDFLARE_ACCOUNT_ID;
+    delete process.env.CLOUDFLARE_API_TOKEN;
+    expect(activeEmbeddingProvider()).toBe('local');
+    process.env.EMBEDDINGS_DISABLED = '1';
+    expect(activeEmbeddingProvider()).toBeNull();
+  });
+});
+
 describe('Cloudflare embeddings', () => {
   it('is preferred when configured and batches texts in one request', async () => {
-    post.mockResolvedValue({ data: { success: true, result: { shape: [2, 1024], data: [vec(1), vec(2)] } } });
-    expect(activeEmbeddingModel()).toBe('cloudflare:@cf/baai/bge-m3');
+    post.mockResolvedValue({ data: { success: true, result: { shape: [2, 384], data: [vec(1), vec(2)] } } });
+    expect(activeEmbeddingProvider()).toBe('cloudflare');
+    expect(activeEmbeddingModel()).toBe('BAAI/bge-small-en-v1.5');
     const out = await embedTexts(['a', 'b']);
     expect(out).toHaveLength(2);
     const [url, body, opts] = post.mock.calls[0];
-    expect(url).toBe('https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/baai/bge-m3');
-    expect(body).toEqual({ text: ['a', 'b'] });
+    expect(url).toBe('https://api.cloudflare.com/client/v4/accounts/acct/ai/run/@cf/baai/bge-small-en-v1.5');
+    expect(body).toEqual({ text: ['a', 'b'], pooling: 'cls' });
+    expect(Math.hypot(...out[0])).toBeCloseTo(1, 5);
     expect(opts.headers.Authorization).toBe('Bearer cf-token');
   });
 
   it('rejects wrong dimensions and API errors', async () => {
     post.mockResolvedValueOnce({ data: { success: true, result: { data: [[1, 2, 3]] } } });
-    await expect(embedTexts(['a'])).rejects.toThrow('expected 1024');
+    await expect(embedTexts(['a'])).rejects.toThrow('expected 384');
     post.mockResolvedValueOnce({ data: { success: false, errors: [{ message: 'Authentication error' }] } });
     await expect(embedTexts(['a'])).rejects.toThrow('Authentication error');
   });
@@ -45,12 +57,12 @@ describe('model switch and backfill (real libSQL)', () => {
   it('clears vectors from another model, then re-embeds every article', async () => {
     const c = createClient({ url: `file:${join(mkdtempSync(join(tmpdir(), 'emb-')), 'e.db')}` });
     await c.execute('CREATE TABLE articles (id TEXT PRIMARY KEY, title TEXT, content TEXT, published_at TEXT)');
-    await ensureEmbeddingColumn(c, 1024);
+    await ensureEmbeddingColumn(c, 384);
     for (let i = 0; i < 3; i++) {
       await c.execute({ sql: 'INSERT INTO articles VALUES (?, ?, ?, ?, vector(?))', args: [`a${i}`, `T${i}`, 'c', `2026-11-1${i}`, `[${vec(i).join(',')}]`] });
     }
     await c.execute(`CREATE TABLE job_state (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`);
-    await c.execute({ sql: 'INSERT INTO job_state VALUES (?, ?, ?)', args: ['embedding:model', 'huggingface:old', 'x'] });
+    await c.execute({ sql: 'INSERT INTO job_state VALUES (?, ?, ?)', args: ['embedding:model', 'huggingface:mixedbread-ai/mxbai-embed-large-v1', 'x'] });
 
     expect(await syncEmbeddingModel(c)).toBe(3);
     expect(await syncEmbeddingModel(c)).toBe(0);

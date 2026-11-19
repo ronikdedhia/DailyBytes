@@ -8,9 +8,6 @@ class PipelineService {
     return runNewsPipeline('newsdata', opts);
   }
 
-  async executeAlphaVantagePipeline(): Promise<PipelineMetrics> {
-    return runNewsPipeline('alphavantage');
-  }
   async executeRssPipeline(): Promise<PipelineMetrics> {
     return runNewsPipeline('rss');
   }

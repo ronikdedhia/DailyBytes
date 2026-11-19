@@ -44,33 +44,40 @@ describe('runDailyJob', () => {
   });
 });
 
-describe('catchUpMissedJobs', () => {
-  beforeEach(() => { store.clear(); calls.length = 0; });
+describe('catchUpMissedJobs (one daily slot)', () => {
+  beforeEach(() => { store.clear(); calls.length = 0; delete process.env.DAILY_RUN_TIME; });
+  const ALL = ['markets', 'news-data', 'rss', 'embed-backfill', 'newsletter', 'telegram-digest', 'telegram-weekly', 'cleanup', 'health-check'];
 
-  it('after waking at 09:00 UTC, runs every job that was due, in schedule order', async () => {
-    const ran = await catchUpMissedJobs(at('2026-11-18T09:00:00Z'));
-    expect(calls).toEqual(['newsletter', 'markets', 'news-data', 'rss', 'telegram-digest', 'telegram-weekly', 'embed-backfill']);
-    expect(ran).toEqual(calls);
-  });
-
-  it('runs nothing before the first job is due', async () => {
-    await catchUpMissedJobs(at('2026-11-18T05:00:00Z'));
+  it('runs nothing before the slot (a visitor waking the server early does no work)', async () => {
+    expect(await catchUpMissedJobs(at('2026-11-18T08:29:00Z'))).toEqual([]);
     expect(calls).toEqual([]);
   });
 
-  it('skips jobs that already ran today', async () => {
-    store.set(dailyStateKey('newsletter'), '2026-11-18');
-    store.set(dailyStateKey('markets'), '2026-11-18');
-    await catchUpMissedJobs(at('2026-11-18T13:00:00Z'));
-    expect(calls).toEqual(['news-data', 'rss', 'telegram-digest', 'telegram-weekly', 'embed-backfill', 'cleanup', 'health-check']);
+  it('runs every job once, in order, on the first wake-up after the slot', async () => {
+    const ran = await catchUpMissedJobs(at('2026-11-18T08:31:00Z'));
+    expect(calls).toEqual(ALL);
+    expect(ran.map((r) => r.job)).toEqual(ALL);
     calls.length = 0;
-    await catchUpMissedJobs(at('2026-11-18T13:15:00Z'));
+    await catchUpMissedJobs(at('2026-11-18T09:15:00Z'));
     expect(calls).toEqual([]);
   });
 
-  it("ignores yesterday's run", async () => {
-    store.set(dailyStateKey('news-data'), '2026-11-17');
-    await catchUpMissedJobs(at('2026-11-18T08:45:00Z'));
-    expect(calls).toContain('news-data');
+  it('retries only the jobs that failed', async () => {
+    outcomes['rss'] = { status: 'failed', error: 'x' };
+    await catchUpMissedJobs(at('2026-11-18T08:31:00Z'));
+    delete outcomes['rss'];
+    calls.length = 0;
+    await catchUpMissedJobs(at('2026-11-18T08:46:00Z'));
+    expect(calls).toEqual(['rss']);
+  });
+
+  it('does not overlap two triggers', async () => {
+    await Promise.all([catchUpMissedJobs(at('2026-11-18T08:31:00Z')), catchUpMissedJobs(at('2026-11-18T08:31:00Z'))]);
+    expect(calls).toEqual(ALL);
+  });
+
+  it('honours DAILY_RUN_TIME', async () => {
+    process.env.DAILY_RUN_TIME = '13:00';
+    expect(await catchUpMissedJobs(at('2026-11-18T12:00:00Z'))).toEqual([]);
   });
 });

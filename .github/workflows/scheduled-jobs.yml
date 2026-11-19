@@ -1,36 +1,30 @@
 name: Scheduled jobs
 
-# The backend runs on Render's free tier, which sleeps after ~15 minutes idle,
-# so in-process node-cron jobs only fire if someone happens to be on the site.
-# This workflow wakes the backend and runs each job over HTTP.
+# The backend runs on Render's free tier, which sleeps when idle. Once a day
+# this wakes it and runs the daily slot (every job, in order); the server
+# then sleeps again. Vercel Cron (frontend/vercel.json) wakes it at 08:50 UTC
+# as a backup if this run is late or skipped.
 #
 # Setup (repo Settings → Secrets and variables → Actions):
 #   secret   PIPELINE_SECRET  same value as the backend's PIPELINE_SECRET
 #   variable BACKEND_URL      e.g. https://daily-bytes-ai.onrender.com
 #
-# GitHub may start scheduled runs late, and disables schedules after 60 days
-# without repository activity.
+# If a run fails, GitHub emails whoever last changed this schedule.
 
 on:
   schedule:
-    - cron: '30 6 * * *'   # newsletter     12:00 PM IST
-    - cron: '30 7 * * *'   # markets         1:00 PM IST
-    - cron: '30 8 * * *'   # news-data       2:00 PM IST
-    - cron: '35 8 * * *'   # rss             2:05 PM IST
-    - cron: '40 8 * * *'   # telegram-digest 2:10 PM IST
-    - cron: '30 12 * * *'  # cleanup         6:00 PM IST
-    - cron: '35 12 * * *'  # health-check    6:05 PM IST
-    - cron: '42 8 * * 0'   # telegram-weekly Sunday 2:12 PM IST
+    - cron: '30 8 * * *'   # 2:00 PM IST
   workflow_dispatch:
     inputs:
       job:
-        description: Job to run
+        description: Job to run (daily = the whole slot)
         required: true
+        default: daily
         type: choice
-        options: [news-data, rss, markets, telegram-digest, telegram-weekly, embed-backfill, health-check, newsletter, cleanup, alpha-vantage]
+        options: [daily, news-data, rss, markets, embed-backfill, newsletter, telegram-digest, telegram-weekly, cleanup, health-check]
 
 concurrency:
-  group: scheduled-jobs-${{ github.event.schedule || inputs.job }}
+  group: scheduled-jobs
   cancel-in-progress: false
 
 permissions: {}
@@ -38,42 +32,23 @@ permissions: {}
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
     steps:
-      - name: Pick job
-        id: pick
-        env:
-          SCHEDULE: ${{ github.event.schedule }}
-          INPUT_JOB: ${{ inputs.job }}
-        run: |
-          case "$SCHEDULE" in
-            '30 6 * * *')  job=newsletter ;;
-            '30 7 * * *')  job=markets ;;
-            '30 8 * * *')  job=news-data ;;
-            '35 8 * * *')  job=rss ;;
-            '40 8 * * *')  job=telegram-digest ;;
-            '30 12 * * *') job=cleanup ;;
-            '35 12 * * *') job=health-check ;;
-            '42 8 * * 0')  job=telegram-weekly ;;
-            *)             job="$INPUT_JOB" ;;
-          esac
-          if [ -z "$job" ]; then echo "No job selected"; exit 1; fi
-          echo "job=$job" >> "$GITHUB_OUTPUT"
-
       - name: Wake backend
         env:
           BACKEND_URL: ${{ vars.BACKEND_URL }}
         run: |
           test -n "$BACKEND_URL" || { echo "BACKEND_URL variable is not set"; exit 1; }
           curl -fsS --retry 6 --retry-delay 20 --retry-all-errors --max-time 90 "$BACKEND_URL/health"
+          echo
 
-      - name: Run ${{ steps.pick.outputs.job }}
+      - name: Run ${{ inputs.job || 'daily' }}
         env:
           BACKEND_URL: ${{ vars.BACKEND_URL }}
           PIPELINE_SECRET: ${{ secrets.PIPELINE_SECRET }}
-          JOB: ${{ steps.pick.outputs.job }}
-        # No retry here: the request waits for the job, and a retry could start it twice.
+          JOB: ${{ inputs.job || 'daily' }}
+        # No retry: the request waits for the jobs, and a retry could overlap them.
         run: |
-          curl -sS --fail-with-body --max-time 1200 -X POST "$BACKEND_URL/api/cron/$JOB" \
+          curl -sS --fail-with-body --max-time 1500 -X POST "$BACKEND_URL/api/cron/$JOB" \
             -H "x-pipeline-secret: $PIPELINE_SECRET"
           echo

@@ -1,38 +1,39 @@
+import path from 'path';
 import axios from 'axios';
-import { config } from '../config';
 import { logger } from '../utils/logger';
 import { EMBEDDING_DIM } from '../db/embedding-migration';
 
 export { EMBEDDING_DIM };
 
 /**
- * Embedding providers, both 1024-dim to match articles.embedding:
- * - Cloudflare Workers AI `@cf/baai/bge-m3` (free daily allowance, multilingual),
- *   used when CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are set
- * - Hugging Face `mxbai-embed-large-v1` (needs inference credits) otherwise
- * Vectors from different models can't be compared, so embedding-sync.service
- * clears stored vectors when the active model changes.
+ * Article embeddings with BAAI/bge-small-en-v1.5 (384-dim, CLS pooling, normalised).
+ *
+ * - local (default): runs in-process with transformers.js (ONNX, 8-bit, ~34 MB
+ *   model). No account, no API credits. The model is downloaded at build time
+ *   (`npm run build`) into ./models, and loaded lazily on the first embedding.
+ * - cloudflare (optional): the same model on Workers AI, used when
+ *   CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN are set. Same model and
+ *   pooling, so vectors from either provider are comparable.
+ *
+ * Hugging Face's hosted inference was dropped: it needs paid credits.
  */
-export type EmbeddingProvider = 'cloudflare' | 'huggingface';
+export type EmbeddingProvider = 'local' | 'cloudflare';
 
-const CF_MODEL = process.env.CLOUDFLARE_EMBEDDING_MODEL || '@cf/baai/bge-m3';
-const HF_MODEL_URL =
-  process.env.HF_INFERENCE_URL ||
-  'https://router.huggingface.co/hf-inference/models/mixedbread-ai/mxbai-embed-large-v1';
-const MAX_CHARS = 2000;
+export const EMBEDDING_MODEL = 'BAAI/bge-small-en-v1.5';
+const LOCAL_MODEL = 'Xenova/bge-small-en-v1.5';
+const CF_MODEL = '@cf/baai/bge-small-en-v1.5';
+export const MODEL_CACHE_DIR = path.resolve(__dirname, '..', '..', 'models');
+const MAX_CHARS = 2000; // the model reads 512 tokens; longer text is truncated anyway
 
 export function activeEmbeddingProvider(): EmbeddingProvider | null {
+  if (process.env.EMBEDDINGS_DISABLED === '1') return null;
   if (process.env.CLOUDFLARE_ACCOUNT_ID && process.env.CLOUDFLARE_API_TOKEN) return 'cloudflare';
-  if (config.huggingface.apiKey) return 'huggingface';
-  return null;
+  return 'local';
 }
 
-/** Identifies which model produced the stored vectors. */
+/** Identifies the model behind stored vectors (provider-independent). */
 export function activeEmbeddingModel(): string | null {
-  const provider = activeEmbeddingProvider();
-  if (provider === 'cloudflare') return `cloudflare:${CF_MODEL}`;
-  if (provider === 'huggingface') return `huggingface:${HF_MODEL_URL.split('/models/')[1] ?? HF_MODEL_URL}`;
-  return null;
+  return activeEmbeddingProvider() ? EMBEDDING_MODEL : null;
 }
 
 function checkDims(vectors: unknown, count: number): number[][] {
@@ -47,9 +48,36 @@ function checkDims(vectors: unknown, count: number): number[][] {
   return vectors as number[][];
 }
 
+type Extractor = (texts: string[], opts: { pooling: 'cls'; normalize: boolean }) => Promise<{ tolist(): number[][] }>;
+let extractor: Promise<Extractor> | null = null;
+
+/** Load the local model once (lazy, so a wake-up that doesn't embed stays light). */
+export function loadLocalModel(): Promise<Extractor> {
+  if (!extractor) {
+    extractor = (async () => {
+      const started = Date.now();
+      const { pipeline, env } = await import('@huggingface/transformers');
+      env.cacheDir = MODEL_CACHE_DIR;
+      const fe = await pipeline('feature-extraction', LOCAL_MODEL, { dtype: 'q8' });
+      logger.info(`✅ Local embedding model loaded in ${Date.now() - started} ms`);
+      return fe as unknown as Extractor;
+    })().catch((err) => {
+      extractor = null;
+      throw err;
+    });
+  }
+  return extractor;
+}
+
+async function embedLocal(texts: string[]): Promise<number[][]> {
+  const fe = await loadLocalModel();
+  const out = await fe(texts, { pooling: 'cls', normalize: true });
+  return checkDims(out.tolist(), texts.length);
+}
+
 async function embedCloudflare(texts: string[]): Promise<number[][]> {
   const url = `https://api.cloudflare.com/client/v4/accounts/${process.env.CLOUDFLARE_ACCOUNT_ID}/ai/run/${CF_MODEL}`;
-  const { data } = await axios.post(url, { text: texts }, {
+  const { data } = await axios.post(url, { text: texts, pooling: 'cls' }, {
     headers: { Authorization: `Bearer ${process.env.CLOUDFLARE_API_TOKEN}`, 'Content-Type': 'application/json' },
     timeout: 30_000,
     validateStatus: () => true,
@@ -58,53 +86,29 @@ async function embedCloudflare(texts: string[]): Promise<number[][]> {
     const message = data?.errors?.map((e: any) => e.message).join('; ') || 'no response';
     throw new Error(`Cloudflare embeddings failed: ${message}`);
   }
-  // bge-large returns result.data; bge-m3 has also been documented as result.response.
-  return checkDims(data.result?.data ?? data.result?.response, texts.length);
+  // Workers AI returns CLS vectors unnormalised; normalise to match the local model.
+  const vectors = checkDims(data.result?.data, texts.length);
+  return vectors.map((v) => {
+    const norm = Math.hypot(...v) || 1;
+    return v.map((x) => x / norm);
+  });
 }
 
-async function embedHuggingFace(texts: string[]): Promise<number[][]> {
-  const vectors: number[][] = [];
-  for (const text of texts) {
-    const response = await axios.post(HF_MODEL_URL, { inputs: text }, {
-      headers: { Authorization: `Bearer ${config.huggingface.apiKey}`, 'Content-Type': 'application/json' },
-      timeout: 15_000,
-    });
-    const out = response.data;
-    vectors.push(Array.isArray(out?.[0]) ? out[0] : out);
-  }
-  return checkDims(vectors, texts.length);
-}
-
-/** Embed several texts in one request where the provider supports it. */
+/** Embed several texts in one call. */
 export async function embedTexts(texts: string[]): Promise<number[][]> {
   if (texts.length === 0) return [];
   const clipped = texts.map((t) => (t || ' ').slice(0, MAX_CHARS));
   const provider = activeEmbeddingProvider();
   if (provider === 'cloudflare') return embedCloudflare(clipped);
-  if (provider === 'huggingface') return embedHuggingFace(clipped.map((t) => t.slice(0, 512)));
-  throw new Error('No embedding provider configured (set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN)');
+  if (provider === 'local') return embedLocal(clipped);
+  throw new Error('Embeddings are disabled (EMBEDDINGS_DISABLED=1)');
 }
 
 export async function embedText(text: string): Promise<number[]> {
   return (await embedTexts([text]))[0];
 }
 
-export function warmupEmbedder(retries = 3, delayMs = 5000): void {
-  if (!activeEmbeddingProvider()) {
-    logger.info('ℹ  No embedding provider configured — semantic search uses keyword fallback');
-    return;
-  }
-  const attempt = (remaining: number) => {
-    embedText('warmup')
-      .then(() => logger.info(`✅ Embedding service warmed up (${activeEmbeddingModel()})`))
-      .catch((err: Error) => {
-        if (remaining > 0) {
-          logger.warn(`Embedding warmup failed, retrying in ${delayMs / 1000}s (${remaining} left): ${err.message}`);
-          setTimeout(() => attempt(remaining - 1), delayMs);
-        } else {
-          logger.warn(`Embedding warmup failed after all retries: ${err.message}`);
-        }
-      });
-  };
-  attempt(retries);
+/** Kept for the boot sequence; the local model now loads on first use instead. */
+export function warmupEmbedder(): void {
+  logger.info(`ℹ  Embeddings: ${activeEmbeddingProvider() ?? 'disabled'} (${EMBEDDING_MODEL}, loaded on first use)`);
 }

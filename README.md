@@ -8,7 +8,7 @@ A full-stack AI-powered news aggregation and intelligence platform. Fetches news
 
 ## Tech Stack
 
-**Backend:** Node.js · TypeScript · Express.js · LangGraph · Drizzle ORM · Turso (libSQL/SQLite) · Groq LLM · Cloudflare Workers AI · Hugging Face · ElevenLabs · Brevo · Telegram Bot API · node-cron · Upstash QStash
+**Backend:** Node.js · TypeScript · Express.js · LangGraph · Drizzle ORM · Turso (libSQL/SQLite) · Groq LLM · transformers.js (local embeddings) · ElevenLabs · Brevo · Telegram Bot API · node-cron · Upstash QStash
 
 **Frontend:** Next.js 14 · React 18 · TypeScript · Tailwind CSS · shadcn/ui · Lucide Icons · Clerk Auth
 
@@ -29,16 +29,16 @@ The news pipeline is a LangGraph state machine with discrete nodes: **fetch → 
 - **ELI5 (Explain Like I'm 5)** — On-demand Groq-generated plain-language explanation per article; stored in `articles.eli5_summary` and cached after first generation; endpoint: `GET /api/articles/:id/eli5`
 - **Bias Detection** — Groq prompt scores each article's framing as `left` / `center` / `right` with a confidence score (0–100); stored as `articles.bias_label` + `articles.bias_score`; displayed as a subtle chip on the card
 - **Auto Hashtag Generation** — Generates 4 relevant hashtags per article using Groq LLM
-- **Semantic Embeddings** — Each article embedded at save time (1024-dim): Cloudflare Workers AI `@cf/baai/bge-m3` (free daily allowance) when `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_API_TOKEN` are set, otherwise Hugging Face `mixedbread-ai/mxbai-embed-large-v1`. The active model is recorded in `job_state`; when it changes, old vectors are cleared and the daily `embed-backfill` job re-embeds articles in batches
+- **Semantic Embeddings** — Each article embedded at save time with `BAAI/bge-small-en-v1.5` (384-dim) running **in-process** via transformers.js: no account, no API credits. The 34 MB model is downloaded at build time into `./models` and loaded on first use (~0.3 s; ~150 MB RAM). Optional: set `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_API_TOKEN` to run the same model on Workers AI instead (same vectors, so switching needs no re-embedding). The daily `embed-backfill` job fills in any article without a vector
 - **Schema Validation** — Zod validation ensures summaries meet word count and quality constraints
 - **Graceful Degradation** — Analysis failures are non-blocking; pipeline continues with defaults
 
 ### News Sources & Scheduling
 - **NewsData.io** — Latest Indian English-language news (`country=in`) in education, entertainment, politics, sports and technology; 10 articles per run
 - **RSS feeds (free)** — 10 feeds from The Hindu, Hindustan Times, Mint and NDTV covering nation, business, sports, technology and entertainment (`src/services/rss.service.ts`). Items older than 36 hours or without a description are skipped; feeds are interleaved so no single outlet dominates; up to `RSS_MAX_ARTICLES` (default 25) new articles are enriched per run. Tracking parameters are stripped from URLs so the same story isn't saved twice
-- **Market news (free)** — ET Markets (2 feeds), Mint Markets and BusinessLine Markets, up to `MARKETS_MAX_ARTICLES` (default 10) per run; served by `/api/stock-news`. This replaced Alpha Vantage, whose news endpoint became premium (the `alpha-vantage` job still exists for manual runs with a premium key). Moneycontrol and Business Standard feeds were left out because they return 403 to bots
+- **Market news (free)** — ET Markets (2 feeds), Mint Markets and BusinessLine Markets, up to `MARKETS_MAX_ARTICLES` (default 10) per run; served by `/api/stock-news`. Moneycontrol and Business Standard feeds were left out because they return 403 to bots. (Alpha Vantage was removed: its news endpoint is premium-only.)
 - **Feed health** — every RSS run records per-feed success; a feed failing 3 days in a row is reported by the daily health check
-- **Daily schedule** — runs every day even though the backend sleeps on Render's free tier (see [Scheduled Jobs](#scheduled-jobs))
+- **Daily schedule** — one wake-up a day runs every job, so the free Render instance sleeps the rest of the time (see [Scheduled Jobs](#scheduled-jobs))
 - **Auto Cleanup** — Removes articles older than 30 days, at most once every 15 days; the last-run time is stored in the `job_state` table so it survives restarts
 - **Duplicate Detection** — URL-based deduplication before insert
 
@@ -56,7 +56,7 @@ A personal bot alongside the broadcast channel. Users talk to it in a private ch
 
 A topic or alert is a category name (`sports`) or any word or name, matched as a whole word in the title or summary, or inside a hashtag (`cricket` matches `#IndiaCricket`). Up to 10 topics and 10 alerts per chat. Users who block the bot are skipped.
 
-The bot needs its **own** token in `TELEGRAM_BOT_TOKEN` (create one with [@BotFather](https://t.me/BotFather)); `TELEGRAM_ACCESS_TOKEN` stays the channel broadcaster. On boot the backend sets the webhook to `/api/telegram/webhook` (secret-token verified) on `BACKEND_PUBLIC_URL` or Render's `RENDER_EXTERNAL_URL`, and publishes the command menu. It refuses to replace a webhook that points at another host, so a token shared with another app isn't hijacked (override: `TELEGRAM_BOT_TAKEOVER=1`). On Render's free tier the first reply after the backend has been asleep takes ~30–60 s.
+**One bot for everything.** The bot is the same one that posts to the channel (`TELEGRAM_ACCESS_TOKEN`; `TELEGRAM_BOT_TOKEN` overrides it). It is shared with the owner's EarningsLens app: Daily Bytes owns the webhook (`/api/telegram/webhook`, secret-token verified, registered on boot) and forwards the owner's EarningsLens commands to EarningsLens unchanged. On first boot it takes over the webhook from EarningsLens and remembers that URL as the forward target (`TELEGRAM_FORWARD_URL` overrides it); EarningsLens no longer takes the webhook back. EarningsLens commands that clash with Daily Bytes ones are used as `/ebrief`, `/eask`, `/ehelp`; the others (`/results`, `/val`, `/holdings`, `/orders`, `/fda`, `/signals`, `/watchlist`) keep their names. Only the owner chat (`TELEGRAM_CHAT_ID`) sees them in its command menu and can use them. On Render's free tier the first reply after the backend has been asleep takes ~30–60 s; messages to the bot wake it.
 
 ### Article Intelligence on Cards
 - **Sentiment Badge** — Color-coded badge on each card (green = positive, gray = neutral, red = negative)
@@ -113,7 +113,7 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 
 ### Search
 - **Full-text Search** — Default keyword search by title or hashtags (`?mode=keyword`)
-- **Semantic Search** — Vector search mode (`?mode=semantic`) using Hugging Face `mixedbread-ai/mxbai-embed-large-v1` (1024-dim) embeddings; query embedded at request time. Falls back to keyword search (response has `fallback: "keyword"`) if embedding fails
+- **Semantic Search** — Vector search mode (`?mode=semantic`) using the same local `bge-small-en-v1.5` model; query embedded at request time. Falls back to keyword search (response has `fallback: "keyword"`) if embedding fails
 - **Search History** — Last 10 queries stored in localStorage, shown as clickable chips; individual queries removable
 - **Tighter Rate Limit** — Search endpoint capped at 15 req/min (vs. 100/15 min for general API)
 
@@ -195,7 +195,7 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 | `notifications` | In-app notifications triggered by keyword alert matches |
 | `user_dismissals` | Articles permanently dismissed by a user |
 | `api_keys` | Developer API keys: key value, name, daily limit, last used |
-| `pipeline_runs` | Every pipeline execution: source (`newsdata`, `rss`, `alphavantage`), status, counts, duration |
+| `pipeline_runs` | Every pipeline execution: source (`newsdata`, `rss`, `markets`; older rows `alphavantage`), status, counts, duration |
 | `job_state` | Scheduler bookkeeping: last cleanup, last daily run of each job, last newsletter date |
 | `telegram_chats` | Bot chats: digest on/off, blocked flag |
 | `telegram_subscriptions` | Bot topics and alerts per chat |
@@ -253,35 +253,37 @@ Keyboard-driven navigation — active on the main feed, inactive when typing in 
 | POST | `/api/newsletter/unsubscribe` | None | Public unsubscribe |
 | POST | `/api/trigger-pipeline` | Secret | Manual pipeline trigger (`x-pipeline-secret` header) |
 | POST | `/api/trigger-newsletter` | Secret | Manual newsletter trigger (`x-pipeline-secret` header) |
-| POST | `/api/cron/:job` | Secret | Run a scheduled job and wait for it (`news-data`, `rss`, `markets`, `telegram-digest`, `telegram-weekly`, `embed-backfill`, `health-check`, `cleanup`, `newsletter`, `alpha-vantage`); once per UTC day unless `?force=1` |
+| POST | `/api/cron/:job` | Secret | Run a scheduled job and wait for it (`news-data`, `rss`, `markets`, `embed-backfill`, `newsletter`, `telegram-digest`, `telegram-weekly`, `cleanup`, `health-check`); once per UTC day unless `?force=1` |
+| POST | `/api/cron/daily` | Secret | Run today's daily slot (every job not yet done, in order) and wait |
+| POST | `/api/diagnostics` | Secret | Read-only: live commit, Brevo and Groq checks from the server, bot webhook, embedding provider, schedule |
 | POST | `/api/telegram/webhook` | Telegram secret token | Messages to the two-way bot |
 
 ---
 
 ## Scheduled Jobs
-| Time (IST) | Time (UTC) | Job |
+Render's free tier sleeps after ~15 minutes without traffic, so the backend is woken **once a day** and runs every job in one go, in this order, at **08:30 UTC = 2:00 PM IST** (`DAILY_RUN_TIME`):
+
+| # | Job | What it does |
 |---|---|---|
-| 12:00 PM | 06:30 | `newsletter` — daily email digest (`NEWSLETTER_SEND_TIME`, UTC) |
-| 1:00 PM | 07:30 | `markets` — market news pipeline (free ET Markets / Mint / BusinessLine feeds) |
-| 2:00 PM | 08:30 | `news-data` — NewsData pipeline: fetch → dedupe → AI enrich → save → Telegram channel → keyword alerts and bot alerts |
-| 2:05 PM | 08:35 | `rss` — same pipeline over the free RSS feeds |
-| 2:10 PM | 08:40 | `telegram-digest` — personal daily digest to every bot chat with the digest on |
-| 2:12 PM | 08:42 | `telegram-weekly` — weekly wrap to bot chats; runs daily but only sends on Sundays (UTC) |
-| 2:14 PM | 08:44 | `embed-backfill` — embed up to 300 articles that have no vector |
-| 6:00 PM | 12:30 | `cleanup` — delete articles older than 30 days (if 15+ days since the last cleanup) |
-| 6:05 PM | 12:35 | `health-check` — messages the admin on Telegram if no pipeline ran or saved anything in 24 h, a run failed, or a feed has failed 3+ days in a row. Silent when all is well |
+| 1 | `markets` | Market news feeds (ET Markets, Mint, BusinessLine) |
+| 2 | `news-data` | NewsData.io: fetch → dedupe → AI enrich → save → Telegram channel → keyword alerts and bot alerts |
+| 3 | `rss` | Same pipeline over the outlet RSS feeds |
+| 4 | `embed-backfill` | Vectors for any article that has none |
+| 5 | `newsletter` | Email digest, with today's articles |
+| 6 | `telegram-digest` | Personal bot digests |
+| 7 | `telegram-weekly` | Weekly wrap (Sundays, UTC, only) |
+| 8 | `cleanup` | Delete articles older than 30 days (if 15+ days since the last cleanup) |
+| 9 | `health-check` | Telegram message to the owner if no pipeline ran or saved anything in 24 h, a run failed, a feed failed 3+ days in a row, Brevo can't send (key, IP allow-list, sender, credits) or the Groq model doesn't answer. Silent when all is well |
 
-The backend runs on Render's free tier, which sleeps after ~15 minutes without traffic, so an in-process timer alone is not enough. Each job runs **at most once per UTC day**, and any of these triggers can start it:
+Triggers (any one is enough; each job runs at most once per UTC day):
+1. **GitHub Actions** (`.github/workflows/scheduled-jobs.yml`) at 08:30 UTC wakes the backend and calls `POST /api/cron/daily`, waiting for the result. Needs the `PIPELINE_SECRET` repo secret and `BACKEND_URL` repo variable. Run any single job by hand from the Actions tab. GitHub emails you if a run fails.
+2. **Vercel Cron** (`frontend/vercel.json`) at 08:50 UTC calls `/api/wake` on the frontend, which wakes the backend; on boot the backend runs whatever hasn't run today. Backup for a late or skipped GitHub run.
+3. **Upstash QStash** (optional) `/api/qstash/daily`, signature-verified, when `QSTASH_TOKEN` and `BACKEND_PUBLIC_URL` are set.
+4. In-process: node-cron at the slot, and a re-check on boot and every 15 minutes while awake. These never keep the server awake; only HTTP traffic does.
 
-1. **Catch-up on wake** — on boot and every 15 minutes while awake, the backend runs every job whose time has passed today but which hasn't completed yet, in schedule order (so one wake-up runs `news-data`, then `rss`, then the digest). Any request wakes a sleeping Render instance, so a visitor, a health check or the triggers below are enough.
-2. **Vercel Cron** (`frontend/vercel.json`) — calls `/api/wake` on the frontend at 08:45 and 12:45 UTC, which wakes the backend. Optional `CRON_SECRET` env var on Vercel protects the route.
-3. **GitHub Actions** (`.github/workflows/scheduled-jobs.yml`) — calls `POST /api/cron/:job` with the `x-pipeline-secret` header and waits for the result. Needs the `PIPELINE_SECRET` repo secret and `BACKEND_URL` repo variable. Also runnable by hand from the Actions tab. GitHub can start scheduled runs late or skip them.
-4. **node-cron** inside the process, when it happens to be awake at the scheduled time.
-5. **Upstash QStash** (optional) — `/api/qstash/*`, signature-verified, when `QSTASH_TOKEN` and `BACKEND_PUBLIC_URL` are set.
+A visitor waking the server before 08:30 UTC triggers no work. A failed job is retried by the next trigger that day; the others aren't re-run. One run at a time per process. To run a job again on the same day: `POST /api/cron/:job?force=1`.
 
-A run only counts once it completes; a failed run (e.g. the news API rejects the request) is retried by the next trigger that day. Each job also holds an in-process lock, so overlapping triggers never run it twice at once. To run a job again on the same day: `POST /api/cron/:job?force=1`.
-
-After each pipeline run, new articles are checked against users' keyword alerts.
+Expected Render usage: one ~15–25 minute wake a day for the jobs, plus wake-ups from site visitors and bot messages.
 
 ---
 ## Setup
@@ -327,11 +329,11 @@ NEXT_PUBLIC_API_URL=http://localhost:3000
 ### Optional
 
 ```
-CLOUDFLARE_ACCOUNT_ID=      # Workers AI embeddings (free allowance); preferred over Hugging Face
+CLOUDFLARE_ACCOUNT_ID=      # optional: run the embedding model on Workers AI instead of in-process
 CLOUDFLARE_API_TOKEN=       # token with the "Workers AI" permission
-HUGGING_FACE_API_KEY=       # fallback embedding provider (needs inference credits)
+EMBEDDINGS_DISABLED=        # 1 = no embeddings (semantic search falls back to keyword)
+DAILY_RUN_TIME=08:30        # UTC time of the daily slot (2:00 PM IST)
 TELEGRAM_ADMIN_CHAT_ID=     # your own chat id for health-check alerts (falls back to TELEGRAM_CHAT_ID); sent via the channel bot
-ALPHA_VANTAGE_API_KEY=      # stock news
 ELEVENLABS_API_KEY=         # server-side TTS (falls back to browser Web Speech API)
 ELEVENLABS_VOICE=           # voice name or ID (e.g. "Rachel" or a 20-char ID)
 PIPELINE_SECRET=            # guards /api/trigger-pipeline and /api/trigger-newsletter
@@ -341,13 +343,13 @@ QSTASH_TOKEN=               # registers external schedules (needs BACKEND_PUBLIC
 BACKEND_PUBLIC_URL=         # public URL of this backend, e.g. https://your-app.onrender.com
 QSTASH_CURRENT_SIGNING_KEY= # required in production for /api/qstash/* routes
 QSTASH_NEXT_SIGNING_KEY=
-TELEGRAM_BOT_TOKEN=         # separate @BotFather token for the two-way bot (/brief, /ask, /topic, /alert)
+TELEGRAM_BOT_TOKEN=         # only to use a different bot than TELEGRAM_ACCESS_TOKEN for commands
+TELEGRAM_FORWARD_URL=       # EarningsLens webhook to forward its commands to (auto-detected on first takeover)
 RSS_MAX_ARTICLES=25         # new RSS articles enriched per run (one Groq call each)
 MARKETS_MAX_ARTICLES=10     # new market articles enriched per run
 PIPELINE_MAX_CONCURRENCY=3  # articles enriched in parallel (Groq free tier: 8000 tokens/min)
-NEWSLETTER_SEND_TIME=06:30  # UTC time for daily newsletter (default 06:30 = 12:00 PM IST)
 NEWSLETTER_ARTICLES_COUNT=5
-GROQ_MODEL=qwen/qwen3.8-27b  # retired models (e.g. llama-3.1-8b-instant) fall back to this default
+GROQ_MODEL=qwen/qwen3.8-27b  # include the provider prefix; a missing prefix (qwen3.8-27b) is added, retired models fall back to this default
 MAX_ARTICLES_TO_FETCH=10
 ```
 
@@ -359,7 +361,7 @@ Frontend (Vercel): `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY`, o
 `npm test` runs the Vitest suite in `tests/`: Clerk token verification (forged, tampered, expired and wrong-origin tokens), QStash signature checks, the `/api/cron/:job` endpoint, daily-run and catch-up logic, cleanup interval, newsletter de-duplication, job locks, NewsData request parameters, the embedding column migration (against a real libSQL database), Groq model selection, RSS parsing (real parser against local feeds), topic/alert matching, every bot command including `/ask` and the weekly wrap, alerts and digests, the one-call enrichment and its per-field fallback, feed-health tracking, the health check, Cloudflare embeddings and model-switch backfill (against a real libSQL file) (against a real libSQL file) and the bot webhook.
 
 ## Known limitations
-- **Embeddings** need either Cloudflare Workers AI credentials or Hugging Face credits; without them new articles get no vectors and semantic search falls back to keyword search.
+- **Embeddings** run on Render's CPU; the free instance has 512 MB RAM and the model adds ~150 MB. Set `EMBEDDINGS_DISABLED=1` if memory ever becomes a problem.
 - **`/ask`** uses keyword search, so it only finds stories whose title, summary or hashtags contain the question's words; it can't answer about events the site hasn't stored (the database keeps 30 days).
 - **Brevo** rejects API calls from IP addresses not on the account's authorised list; disable that setting or add Render's outbound IPs, or newsletters will fail.
 - Some NewsData categories don't map to ours, so a few articles have no category.

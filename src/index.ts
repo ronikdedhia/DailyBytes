@@ -47,7 +47,13 @@ const searchLimiter = rateLimit({
 app.use('/api/search', searchLimiter);
 
 app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'healthy', timestamp: new Date().toISOString(), environment: config.server.nodeEnv });
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    environment: config.server.nodeEnv,
+    // Set by Render on every deploy; shows which commit is live.
+    commit: process.env.RENDER_GIT_COMMIT?.slice(0, 7) ?? null,
+  });
 });
 
 app.use('/api/articles', articlesRouter);
